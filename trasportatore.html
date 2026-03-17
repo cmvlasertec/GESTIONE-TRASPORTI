@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Trasportatore">
+<meta name="theme-color" content="#1a56db">
+<title>Trasportatore — Consegne & Ritiri</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --blue:#1a56db;--blue2:#3b82f6;--blue-bg:#eff6ff;
+  --red:#dc2626;--red-bg:#fef2f2;--red-b:#fecaca;
+  --green:#16a34a;--green-bg:#f0fdf4;--green-b:#bbf7d0;
+  --orange:#d97706;--orange-bg:#fffbeb;--orange-b:#fde68a;
+  --gray:#6b7280;--gray-bg:#f9fafb;--gray-b:#e5e7eb;
+  --white:#ffffff;--dark:#111827;
+  --shadow:0 1px 3px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.08);
+  --shadow-lg:0 10px 25px rgba(0,0,0,.15);
+  --radius:14px;--radius-sm:8px;
+}
+html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:var(--dark);overscroll-behavior:none}
+
+/* HEADER */
+.header{background:linear-gradient(135deg,#1e40af,var(--blue));color:#fff;padding:env(safe-area-inset-top,0) 0 0;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.header-inner{padding:14px 16px 12px;display:flex;align-items:center;justify-content:space-between}
+.header h1{font-size:18px;font-weight:700;letter-spacing:-.3px}
+.header h1 span{font-size:12px;font-weight:400;opacity:.75;display:block;margin-top:1px}
+.header-badges{display:flex;gap:6px}
+.hbadge{background:rgba(255,255,255,.2);border-radius:20px;padding:4px 10px;font-size:12px;font-weight:600}
+.hbadge.urgent{background:var(--red)}
+
+/* FILTER BAR */
+.filter-bar{background:#fff;border-bottom:1px solid #e2e8f0;padding:10px 16px;display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.filter-bar::-webkit-scrollbar{display:none}
+.fb{border:2px solid var(--gray-b);background:#fff;border-radius:20px;padding:6px 14px;font-size:13px;font-weight:600;color:var(--gray);cursor:pointer;white-space:nowrap;transition:all .15s}
+.fb.active{border-color:var(--blue);background:var(--blue-bg);color:var(--blue)}
+.fb.active.urgent{border-color:var(--red);background:var(--red-bg);color:var(--red)}
+
+/* TASK LIST */
+.task-list{padding:12px 16px 100px;display:flex;flex-direction:column;gap:10px}
+.empty{text-align:center;padding:60px 20px;color:var(--gray)}
+.empty .ico{font-size:52px;margin-bottom:12px}
+.empty p{font-size:15px;font-weight:500}
+.empty small{font-size:13px;opacity:.7;margin-top:4px;display:block}
+
+/* TASK CARD */
+.task{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow);border:2px solid transparent;transition:all .2s;overflow:hidden}
+.task.urgent{border-color:var(--red-b);background:linear-gradient(135deg,#fff,#fff9f9)}
+.task.done{opacity:.55;background:#f8fafc}
+.task.done .task-title{text-decoration:line-through;color:var(--gray)}
+
+.task-top{display:flex;align-items:flex-start;padding:12px 14px 10px;gap:10px}
+.pos-badge{min-width:30px;height:30px;border-radius:8px;background:var(--blue);color:#fff;font-weight:800;font-size:14px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;transition:transform .1s;user-select:none}
+.pos-badge:active{transform:scale(.92)}
+.task.urgent .pos-badge{background:var(--red)}
+.task.done .pos-badge{background:var(--gray)}
+.pos-badge.editing{background:#7c3aed}
+
+.task-main{flex:1;min-width:0}
+.task-title{font-size:15px;font-weight:700;line-height:1.3;word-break:break-word}
+.task-meta{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:700}
+.badge-consegna{background:#dbeafe;color:#1d4ed8}
+.badge-ritiro{background:#d1fae5;color:#065f46}
+.badge-entrambi{background:#ede9fe;color:#6d28d9}
+.badge-urgent{background:var(--red-bg);color:var(--red);border:1px solid var(--red-b)}
+.badge-done{background:var(--green-bg);color:var(--green)}
+
+.task-right{display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0}
+.check-btn{width:28px;height:28px;border-radius:50%;border:2.5px solid var(--gray-b);background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px;transition:all .15s}
+.check-btn.done{background:var(--green);border-color:var(--green);color:#fff}
+
+.task-notes{padding:0 14px 12px 54px;font-size:13px;color:var(--gray);line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.task-notes.hidden{display:none}
+
+.task-actions{border-top:1px solid #f1f5f9;display:flex}
+.ta-btn{flex:1;padding:9px 8px;font-size:12px;font-weight:600;background:none;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;color:var(--gray);transition:background .1s}
+.ta-btn:active{background:#f1f5f9}
+.ta-btn.del{color:var(--red)}
+.ta-btn.notes-btn{color:var(--blue)}
+
+/* POS INPUT POPUP */
+.pos-popup{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:300;display:flex;align-items:center;justify-content:center;padding:20px}
+.pos-popup.hidden{display:none}
+.pos-popup-box{background:#fff;border-radius:16px;padding:24px;width:100%;max-width:280px;box-shadow:var(--shadow-lg)}
+.pos-popup-box h3{font-size:16px;font-weight:700;margin-bottom:4px}
+.pos-popup-box p{font-size:13px;color:var(--gray);margin-bottom:16px}
+.pos-popup-box input{width:100%;padding:12px;font-size:20px;font-weight:700;text-align:center;border:2px solid #e2e8f0;border-radius:10px;outline:none}
+.pos-popup-box input:focus{border-color:var(--blue)}
+.pos-popup-actions{display:flex;gap:8px;margin-top:14px}
+.pos-popup-actions button{flex:1;padding:12px;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer}
+.pp-cancel{background:#f1f5f9;color:var(--gray)}
+.pp-ok{background:var(--blue);color:#fff}
+
+/* FAB */
+.fab{position:fixed;bottom:calc(24px + env(safe-area-inset-bottom,0px));right:20px;width:58px;height:58px;border-radius:50%;background:var(--blue);color:#fff;border:none;font-size:28px;cursor:pointer;box-shadow:0 4px 16px rgba(26,86,219,.45);display:flex;align-items:center;justify-content:center;z-index:200;transition:transform .15s}
+.fab:active{transform:scale(.93)}
+
+/* MODAL */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:400;display:flex;align-items:flex-end;justify-content:center}
+.modal-bg.hidden{display:none}
+.modal{background:#fff;border-radius:24px 24px 0 0;padding:20px 20px calc(20px + env(safe-area-inset-bottom,0px));width:100%;max-width:600px;max-height:92vh;overflow-y:auto;animation:slideUp .25s ease}
+@keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+.modal h2{font-size:18px;font-weight:700;margin-bottom:18px;display:flex;align-items:center;gap:8px}
+.modal-handle{width:40px;height:4px;background:#e2e8f0;border-radius:2px;margin:0 auto 16px}
+
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:12px;font-weight:700;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.form-group input,.form-group textarea,.form-group select{width:100%;padding:12px 14px;border:2px solid #e2e8f0;border-radius:10px;font-size:15px;font-family:inherit;outline:none;transition:border .15s;background:#fff;color:var(--dark)}
+.form-group input:focus,.form-group textarea:focus,.form-group select:focus{border-color:var(--blue)}
+.form-group textarea{min-height:80px;resize:none;line-height:1.5}
+
+.type-group{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.type-opt{border:2px solid #e2e8f0;border-radius:10px;padding:10px 6px;text-align:center;cursor:pointer;transition:all .15s;font-size:13px;font-weight:600}
+.type-opt .ico{font-size:22px;display:block;margin-bottom:4px}
+.type-opt.sel-consegna{border-color:#1d4ed8;background:#dbeafe;color:#1d4ed8}
+.type-opt.sel-ritiro{border-color:#065f46;background:#d1fae5;color:#065f46}
+.type-opt.sel-entrambi{border-color:#6d28d9;background:#ede9fe;color:#6d28d9}
+
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #f1f5f9}
+.toggle-row label{font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.toggle{position:relative;width:48px;height:28px;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0}
+.toggle-slider{position:absolute;inset:0;background:#d1d5db;border-radius:14px;cursor:pointer;transition:.2s}
+.toggle-slider:before{content:'';position:absolute;width:22px;height:22px;background:#fff;border-radius:50%;left:3px;top:3px;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.toggle input:checked+.toggle-slider{background:var(--red)}
+.toggle input:checked+.toggle-slider:before{transform:translateX(20px)}
+
+.pos-row{display:flex;align-items:center;gap:10px}
+.pos-row input{width:80px;text-align:center;font-weight:700;font-size:18px}
+.pos-hint{font-size:12px;color:var(--gray)}
+
+.modal-btns{display:flex;gap:10px;margin-top:20px}
+.btn{flex:1;padding:14px;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;transition:all .15s}
+.btn:active{transform:scale(.97)}
+.btn-cancel{background:#f1f5f9;color:var(--gray)}
+.btn-save{background:var(--blue);color:#fff;box-shadow:0 4px 12px rgba(26,86,219,.3)}
+.btn-delete{background:var(--red-bg);color:var(--red);border:2px solid var(--red-b)}
+
+/* UTIL */
+.hidden{display:none!important}
+
+/* SYNC BAR */
+.sync-bar{display:flex;align-items:center;justify-content:space-between;padding:7px 16px;font-size:12px;font-weight:600;gap:8px;border-bottom:1px solid rgba(255,255,255,.1)}
+.sync-bar.ok{background:rgba(22,163,74,.25);color:#bbf7d0}
+.sync-bar.syncing{background:rgba(217,119,6,.25);color:#fde68a}
+.sync-bar.err{background:rgba(220,38,38,.25);color:#fecaca}
+.sync-bar.local{background:rgba(107,114,128,.2);color:#d1d5db}
+.sync-dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex-shrink:0}
+.sync-bar button{background:rgba(255,255,255,.2);border:none;color:inherit;font-size:11px;font-weight:700;padding:3px 8px;border-radius:10px;cursor:pointer}
+
+/* CONFIG MODAL */
+.cfg-modal{background:#fff;border-radius:24px 24px 0 0;padding:24px 20px calc(24px + env(safe-area-inset-bottom,0px));width:100%;max-width:600px;animation:slideUp .25s ease}
+.cfg-step{display:flex;align-items:flex-start;gap:10px;margin-bottom:14px;font-size:14px;line-height:1.5}
+.cfg-step-n{min-width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-weight:800;font-size:12px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+.cfg-link{color:var(--blue);font-weight:700}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="header-inner">
+    <div>
+      <h1>🚚 Trasportatore <span>Consegne & Ritiri</span></h1>
+    </div>
+    <div class="header-badges">
+      <div class="hbadge" id="badgeTot">0 task</div>
+      <div class="hbadge urgent hidden" id="badgeUrgent">⚡ <span id="urgentCount">0</span></div>
+      <button onclick="openCfg()" style="background:rgba(255,255,255,.25);border:none;color:#fff;font-size:20px;width:38px;height:38px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">⚙️</button>
+    </div>
+  </div>
+  <div class="sync-bar local" id="syncBar">
+    <span style="display:flex;align-items:center;gap:6px"><span class="sync-dot"></span><span id="syncMsg">Solo locale — configura Firebase per sync</span></span>
+    <button onclick="openCfg()">⚙️ Configura</button>
+  </div>
+</div>
+
+<!-- CONFIG MODAL -->
+<div class="modal-bg hidden" id="cfgBg" onclick="if(event.target===this)closeCfg()">
+  <div class="cfg-modal">
+    <div class="modal-handle"></div>
+    <h2 style="font-size:17px;font-weight:700;margin-bottom:6px">⚙️ Configurazione Sync</h2>
+    <p style="font-size:13px;color:var(--gray);margin-bottom:18px">Connetti a Firebase per sincronizzare i task su tutti i dispositivi in tempo reale.</p>
+
+    <div style="background:#eff6ff;border-radius:10px;padding:14px;margin-bottom:18px">
+      <div class="cfg-step"><div class="cfg-step-n">1</div><div>Vai su <a class="cfg-link" href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a> e crea un nuovo progetto (gratuito)</div></div>
+      <div class="cfg-step"><div class="cfg-step-n">2</div><div>Nel progetto: <strong>Build → Realtime Database → Create Database</strong> (scegli "Start in test mode")</div></div>
+      <div class="cfg-step"><div class="cfg-step-n">3</div><div>Copia l'URL del database (tipo: <code style="background:#dbeafe;padding:1px 5px;border-radius:3px;font-size:12px">https://nome-rtdb.firebaseio.com</code>)</div></div>
+      <div class="cfg-step"><div class="cfg-step-n">4</div><div>Incollalo qui sotto e tocca <strong>Connetti</strong></div></div>
+    </div>
+
+    <div class="form-group">
+      <label>URL Firebase Realtime Database</label>
+      <input type="url" id="cfgUrl" placeholder="https://nome-progetto-default-rtdb.firebaseio.com" autocomplete="off" style="font-size:13px">
+    </div>
+    <div id="cfgStatus" style="font-size:13px;margin-bottom:12px;min-height:20px"></div>
+    <div style="display:flex;gap:10px">
+      <button class="btn btn-cancel" onclick="closeCfg()">Chiudi</button>
+      <button class="btn btn-save" onclick="saveAndConnect()">🔗 Connetti</button>
+    </div>
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12px;color:var(--gray)">Rimuovi connessione e usa solo locale</span>
+      <button class="btn" style="background:#fef2f2;color:var(--red);font-size:12px;padding:8px 14px;flex:none" onclick="disconnectFirebase()">🗑️ Disconnetti</button>
+    </div>
+  </div>
+</div>
+
+<!-- FILTER BAR -->
+<div class="filter-bar">
+  <button class="fb active" onclick="setFilter('all',this)">Tutti</button>
+  <button class="fb" onclick="setFilter('pending',this)">Da fare</button>
+  <button class="fb" onclick="setFilter('done',this)">Completati</button>
+  <button class="fb" onclick="setFilter('urgent',this)">⚡ Urgenti</button>
+  <button class="fb" onclick="setFilter('consegna',this)">📦 Consegna</button>
+  <button class="fb" onclick="setFilter('ritiro',this)">🔄 Ritiro</button>
+</div>
+
+<!-- TASK LIST -->
+<div class="task-list" id="taskList"></div>
+
+<!-- FAB -->
+<button class="fab" onclick="openModal()">＋</button>
+
+<!-- POS POPUP -->
+<div class="pos-popup hidden" id="posPopup">
+  <div class="pos-popup-box">
+    <h3>Cambia posizione</h3>
+    <p id="posPopupDesc">Inserisci la nuova posizione per questo task. Gli altri verranno scalati automaticamente.</p>
+    <input type="number" id="posPopupInput" min="1" placeholder="Es. 3">
+    <div class="pos-popup-actions">
+      <button class="pp-cancel" onclick="closePosPopup()">Annulla</button>
+      <button class="pp-ok" onclick="confirmPosChange()">✓ Sposta</button>
+    </div>
+  </div>
+</div>
+
+<!-- ADD/EDIT MODAL -->
+<div class="modal-bg hidden" id="modalBg" onclick="handleModalBgClick(event)">
+  <div class="modal" id="modal">
+    <div class="modal-handle"></div>
+    <h2 id="modalTitle">➕ Nuovo Task</h2>
+
+    <div class="form-group">
+      <label>Destinazione / Indirizzo</label>
+      <input type="text" id="fAddr" placeholder="Es. Via Roma 10, Milano" autocomplete="off">
+    </div>
+
+    <div class="form-group">
+      <label>Tipo</label>
+      <div class="type-group">
+        <div class="type-opt sel-consegna" id="t-consegna" onclick="selType('consegna')">
+          <span class="ico">📦</span>Consegna
+        </div>
+        <div class="type-opt" id="t-ritiro" onclick="selType('ritiro')">
+          <span class="ico">🔄</span>Ritiro
+        </div>
+        <div class="type-opt" id="t-entrambi" onclick="selType('entrambi')">
+          <span class="ico">📦🔄</span>Entrambi
+        </div>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Posizione nella lista</label>
+      <div class="pos-row">
+        <input type="number" id="fPos" min="1" value="1">
+        <span class="pos-hint" id="posHint">di 1 task</span>
+      </div>
+    </div>
+
+    <div class="toggle-row">
+      <label>⚡ Urgente</label>
+      <label class="toggle"><input type="checkbox" id="fUrgent"><span class="toggle-slider"></span></label>
+    </div>
+
+    <div class="toggle-row" style="border:none">
+      <label>✅ Completato</label>
+      <label class="toggle"><input type="checkbox" id="fDone"><span class="toggle-slider" style=""></span></label>
+    </div>
+    <style>.toggle input:checked+.toggle-slider{background:var(--green)!important}</style>
+
+    <div class="form-group" style="margin-top:16px">
+      <label>Note</label>
+      <textarea id="fNotes" placeholder="Informazioni aggiuntive, riferimenti, contatto…"></textarea>
+    </div>
+
+    <div class="modal-btns" id="modalBtns">
+      <button class="btn btn-cancel" onclick="closeModal()">Annulla</button>
+      <button class="btn btn-save" onclick="saveTask()">💾 Salva</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── STATE ──────────────────────────────────────────────
+let tasks=[];
+let filter='all';
+let editId=null;
+let selTypeVal='consegna';
+let posPopupTaskId=null;
+let fbUrl='';         // Firebase DB URL
+let syncTimer=null;   // debounce timer per sync
+
+// Fix toggle colors
+document.getElementById('fDone').parentElement.querySelector('.toggle-slider').style.cssText='';
+
+// ── FIREBASE SYNC ─────────────────────────────────────
+function getFbUrl(){return (localStorage.getItem('trsp_firebase')||'').replace(/\/+$/,'');}
+
+function setSyncStatus(state,msg){
+  const bar=document.getElementById('syncBar');
+  const txt=document.getElementById('syncMsg');
+  bar.className='sync-bar '+state;
+  txt.textContent=msg;
+}
+
+async function loadFromServer(){
+  fbUrl=getFbUrl();
+  if(!fbUrl){loadLocal();setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');return;}
+  setSyncStatus('syncing','Sincronizzazione…');
+  try{
+    const r=await fetch(fbUrl+'/tasks.json');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const data=await r.json();
+    if(data&&typeof data==='object'){
+      tasks=Array.isArray(data)?data.filter(Boolean):Object.values(data).filter(Boolean);
+    } else {
+      tasks=[];
+    }
+    saveLocal();
+    compact();
+    setSyncStatus('ok','✓ Sincronizzato · '+new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}));
+  }catch(e){
+    loadLocal();
+    setSyncStatus('err','⚠ Errore sync — dati locali');
+  }
+}
+
+async function saveToServer(){
+  saveLocal();
+  fbUrl=getFbUrl();
+  if(!fbUrl) return;
+  setSyncStatus('syncing','Salvataggio…');
+  try{
+    const r=await fetch(fbUrl+'/tasks.json',{
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(tasks)
+    });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    setSyncStatus('ok','✓ Sincronizzato · '+new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}));
+  }catch(e){
+    setSyncStatus('err','⚠ Errore sync — salvato solo in locale');
+  }
+}
+
+// Salvataggio con debounce (evita troppe chiamate in rapida successione)
+function save(){
+  saveLocal();
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(()=>saveToServer(),600);
+}
+
+// ── LOCAL STORAGE ─────────────────────────────────────
+function saveLocal(){localStorage.setItem('tsk_v2',JSON.stringify(tasks));}
+function loadLocal(){
+  try{tasks=JSON.parse(localStorage.getItem('tsk_v2')||'[]');}
+  catch(e){tasks=[];}
+  compact();
+}
+
+// ── CONFIG MODAL ──────────────────────────────────────
+function openCfg(){
+  document.getElementById('cfgUrl').value=getFbUrl();
+  document.getElementById('cfgStatus').textContent='';
+  document.getElementById('cfgBg').classList.remove('hidden');
+}
+function closeCfg(){document.getElementById('cfgBg').classList.add('hidden');}
+
+async function saveAndConnect(){
+  const url=document.getElementById('cfgUrl').value.trim().replace(/\/+$/,'');
+  const st=document.getElementById('cfgStatus');
+  if(!url){st.textContent='⚠ Inserisci un URL valido';st.style.color='var(--red)';return;}
+  st.textContent='🔄 Verifica connessione…';st.style.color='var(--gray)';
+  try{
+    const r=await fetch(url+'/tasks.json');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    localStorage.setItem('trsp_firebase',url);
+    fbUrl=url;
+    st.textContent='✅ Connessione riuscita!';st.style.color='var(--green)';
+    setTimeout(()=>{closeCfg();loadFromServer().then(render);},800);
+  }catch(e){
+    st.textContent='❌ Connessione fallita: '+e.message;st.style.color='var(--red)';
+  }
+}
+
+function disconnectFirebase(){
+  if(!confirm('Rimuovere la connessione Firebase? I dati rimarranno in locale.')) return;
+  localStorage.removeItem('trsp_firebase');
+  fbUrl='';
+  closeCfg();
+  setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');
+}
+
+// ── INIT LOAD ─────────────────────────────────────────
+function load(){loadFromServer().then(render);}
+
+// ── ID / HELPERS ─────────────────────────────────────
+function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
+
+function compact(){
+  tasks.sort((a,b)=>a.pos-b.pos);
+  tasks.forEach((t,i)=>t.pos=i+1);
+}
+
+function insertAt(pos,task){
+  tasks.forEach(t=>{if(t.pos>=pos) t.pos++;});
+  task.pos=pos;
+  tasks.push(task);
+  compact();
+}
+
+function moveTo(id,newPos){
+  const t=tasks.find(t=>t.id===id);
+  if(!t) return;
+  const oldPos=t.pos;
+  const max=tasks.length;
+  newPos=Math.max(1,Math.min(max,newPos));
+  if(newPos===oldPos) return;
+  if(newPos>oldPos){
+    tasks.forEach(x=>{if(x.id!==id&&x.pos>oldPos&&x.pos<=newPos) x.pos--;});
+  } else {
+    tasks.forEach(x=>{if(x.id!==id&&x.pos>=newPos&&x.pos<oldPos) x.pos++;});
+  }
+  t.pos=newPos;
+  compact();
+}
+
+// ── FILTER ───────────────────────────────────────────
+function setFilter(f,btn){
+  filter=f;
+  document.querySelectorAll('.fb').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  if(f==='urgent') btn.classList.add('urgent'); else btn.classList.remove('urgent');
+  render();
+}
+
+function filtered(){
+  const s=tasks.slice().sort((a,b)=>a.pos-b.pos);
+  switch(filter){
+    case 'pending':  return s.filter(t=>!t.done);
+    case 'done':     return s.filter(t=>t.done);
+    case 'urgent':   return s.filter(t=>t.urgent&&!t.done);
+    case 'consegna': return s.filter(t=>t.type==='consegna'&&!t.done);
+    case 'ritiro':   return s.filter(t=>t.type==='ritiro'&&!t.done);
+    default:         return s;
+  }
+}
+
+// ── RENDER ───────────────────────────────────────────
+function render(){
+  const list=document.getElementById('taskList');
+  const rows=filtered();
+
+  // Header badges
+  const urgent=tasks.filter(t=>t.urgent&&!t.done).length;
+  document.getElementById('badgeTot').textContent=tasks.length+' task';
+  const bu=document.getElementById('badgeUrgent');
+  document.getElementById('urgentCount').textContent=urgent;
+  urgent>0?bu.classList.remove('hidden'):bu.classList.add('hidden');
+
+  if(!rows.length){
+    list.innerHTML=`<div class="empty"><div class="ico">${filter==='done'?'🎉':'📋'}</div>
+      <p>${filter==='done'?'Nessun task completato':'Nessun task da mostrare'}</p>
+      <small>${filter==='all'?'Tocca + per aggiungere il primo task':''}</small></div>`;
+    return;
+  }
+
+  list.innerHTML=rows.map(t=>{
+    const typeBadge={
+      consegna:`<span class="badge badge-consegna">📦 Consegna</span>`,
+      ritiro:`<span class="badge badge-ritiro">🔄 Ritiro</span>`,
+      entrambi:`<span class="badge badge-entrambi">📦🔄 Entrambi</span>`
+    }[t.type]||'';
+    const urgentBadge=t.urgent?`<span class="badge badge-urgent">⚡ Urgente</span>`:'';
+    const doneBadge=t.done?`<span class="badge badge-done">✅ Fatto</span>`:'';
+    const notesIcon=t.notes?`<button class="ta-btn notes-btn" onclick="toggleNotes('${t.id}')">📝 Note</button>`:'';
+    const notesHtml=t.notes?`<div class="task-notes hidden" id="notes-${t.id}">${esc(t.notes)}</div>`:'';
+    return `
+    <div class="task${t.urgent?' urgent':''}${t.done?' done':''}" id="task-${t.id}">
+      <div class="task-top">
+        <div class="pos-badge" onclick="openPosPopup('${t.id}')" title="Tocca per cambiare posizione">${t.pos}</div>
+        <div class="task-main">
+          <div class="task-title">${esc(t.addr)}</div>
+          <div class="task-meta">${typeBadge}${urgentBadge}${doneBadge}</div>
+        </div>
+        <div class="task-right">
+          <div class="check-btn${t.done?' done':''}" onclick="toggleDone('${t.id}')">${t.done?'✓':''}</div>
+        </div>
+      </div>
+      ${notesHtml}
+      <div class="task-actions">
+        ${notesIcon}
+        <button class="ta-btn" onclick="openEdit('${t.id}')">✏️ Modifica</button>
+        <button class="ta-btn del" onclick="deleteTask('${t.id}')">🗑️</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+// ── ACTIONS ──────────────────────────────────────────
+function toggleDone(id){
+  const t=tasks.find(t=>t.id===id);
+  if(t){t.done=!t.done;save();render();}
+}
+
+function toggleNotes(id){
+  const el=document.getElementById('notes-'+id);
+  if(el) el.classList.toggle('hidden');
+}
+
+function deleteTask(id){
+  if(!confirm('Eliminare questo task?')) return;
+  tasks=tasks.filter(t=>t.id!==id);
+  compact();save();render();
+}
+
+// ── POS POPUP ────────────────────────────────────────
+function openPosPopup(id){
+  posPopupTaskId=id;
+  const t=tasks.find(t=>t.id===id);
+  document.getElementById('posPopupDesc').textContent=
+    `Task "${t.addr.substring(0,30)}" — attualmente in posizione ${t.pos}. Totale: ${tasks.length}`;
+  const inp=document.getElementById('posPopupInput');
+  inp.value=t.pos;
+  document.getElementById('posPopup').classList.remove('hidden');
+  setTimeout(()=>inp.select(),100);
+}
+function closePosPopup(){
+  document.getElementById('posPopup').classList.add('hidden');
+  posPopupTaskId=null;
+}
+function confirmPosChange(){
+  const np=parseInt(document.getElementById('posPopupInput').value);
+  if(!np||np<1){alert('Posizione non valida');return;}
+  moveTo(posPopupTaskId,np);
+  save();render();closePosPopup();
+}
+
+// ── MODAL ────────────────────────────────────────────
+function openModal(){
+  editId=null;
+  selTypeVal='consegna';
+  document.getElementById('modalTitle').textContent='➕ Nuovo Task';
+  document.getElementById('fAddr').value='';
+  document.getElementById('fUrgent').checked=false;
+  document.getElementById('fDone').checked=false;
+  document.getElementById('fNotes').value='';
+  const pos=tasks.length+1;
+  document.getElementById('fPos').value=pos;
+  document.getElementById('posHint').textContent='di '+(tasks.length)+' task — lascia '+(pos)+' per aggiungere in fondo';
+  updateTypeSel();
+  document.getElementById('modalBtns').innerHTML=
+    `<button class="btn btn-cancel" onclick="closeModal()">Annulla</button>
+     <button class="btn btn-save" onclick="saveTask()">💾 Salva</button>`;
+  document.getElementById('modalBg').classList.remove('hidden');
+  setTimeout(()=>document.getElementById('fAddr').focus(),300);
+}
+
+function openEdit(id){
+  const t=tasks.find(t=>t.id===id);
+  if(!t) return;
+  editId=id;
+  selTypeVal=t.type;
+  document.getElementById('modalTitle').textContent='✏️ Modifica Task';
+  document.getElementById('fAddr').value=t.addr;
+  document.getElementById('fUrgent').checked=t.urgent;
+  document.getElementById('fDone').checked=t.done;
+  document.getElementById('fNotes').value=t.notes||'';
+  document.getElementById('fPos').value=t.pos;
+  document.getElementById('posHint').textContent='di '+tasks.length+' task';
+  updateTypeSel();
+  document.getElementById('modalBtns').innerHTML=
+    `<button class="btn btn-delete" onclick="deleteTask('${id}');closeModal()">🗑️ Elimina</button>
+     <button class="btn btn-save" onclick="saveTask()">💾 Aggiorna</button>`;
+  document.getElementById('modalBg').classList.remove('hidden');
+}
+
+function closeModal(){
+  document.getElementById('modalBg').classList.add('hidden');
+  editId=null;
+}
+
+function handleModalBgClick(e){
+  if(e.target===document.getElementById('modalBg')) closeModal();
+}
+
+function selType(t){
+  selTypeVal=t;
+  updateTypeSel();
+}
+function updateTypeSel(){
+  ['consegna','ritiro','entrambi'].forEach(t=>{
+    const el=document.getElementById('t-'+t);
+    el.className='type-opt'+(selTypeVal===t?' sel-'+t:'');
+  });
+}
+
+function saveTask(){
+  const addr=document.getElementById('fAddr').value.trim();
+  if(!addr){alert('Inserisci destinazione/indirizzo');document.getElementById('fAddr').focus();return;}
+  const urgent=document.getElementById('fUrgent').checked;
+  const done=document.getElementById('fDone').checked;
+  const notes=document.getElementById('fNotes').value.trim();
+  const pos=parseInt(document.getElementById('fPos').value)||tasks.length+1;
+
+  if(editId){
+    const t=tasks.find(t=>t.id===editId);
+    const oldPos=t.pos;
+    t.addr=addr;t.type=selTypeVal;t.urgent=urgent;t.done=done;t.notes=notes;
+    if(pos!==oldPos) moveTo(editId,pos); else compact();
+  } else {
+    const t={id:uid(),addr,type:selTypeVal,urgent,done,notes,pos:0,createdAt:Date.now()};
+    insertAt(Math.max(1,Math.min(pos,tasks.length+1)),t);
+  }
+  save();render();closeModal();
+}
+
+// ── KEYBOARD ─────────────────────────────────────────
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){closeModal();closePosPopup();}
+  if(e.key==='Enter'&&!document.getElementById('posPopup').classList.contains('hidden')) confirmPosChange();
+});
+
+// ── INIT ─────────────────────────────────────────────
+load(); // carica da Firebase o locale, poi chiama render()
+</script>
+</body>
+</html>
