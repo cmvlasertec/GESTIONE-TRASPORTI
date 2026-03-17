@@ -142,6 +142,21 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
 
 /* UTIL */
 .hidden{display:none!important}
+
+/* SYNC BAR */
+.sync-bar{display:flex;align-items:center;justify-content:space-between;padding:7px 16px;font-size:12px;font-weight:600;gap:8px;border-bottom:1px solid rgba(255,255,255,.1)}
+.sync-bar.ok{background:rgba(22,163,74,.25);color:#bbf7d0}
+.sync-bar.syncing{background:rgba(217,119,6,.25);color:#fde68a}
+.sync-bar.err{background:rgba(220,38,38,.25);color:#fecaca}
+.sync-bar.local{background:rgba(107,114,128,.2);color:#d1d5db}
+.sync-dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex-shrink:0}
+.sync-bar button{background:rgba(255,255,255,.2);border:none;color:inherit;font-size:11px;font-weight:700;padding:3px 8px;border-radius:10px;cursor:pointer}
+
+/* CONFIG MODAL */
+.cfg-modal{background:#fff;border-radius:24px 24px 0 0;padding:24px 20px calc(24px + env(safe-area-inset-bottom,0px));width:100%;max-width:600px;animation:slideUp .25s ease}
+.cfg-step{display:flex;align-items:flex-start;gap:10px;margin-bottom:14px;font-size:14px;line-height:1.5}
+.cfg-step-n{min-width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-weight:800;font-size:12px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+.cfg-link{color:var(--blue);font-weight:700}
 </style>
 </head>
 <body>
@@ -155,6 +170,41 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
     <div class="header-badges">
       <div class="hbadge" id="badgeTot">0 task</div>
       <div class="hbadge urgent hidden" id="badgeUrgent">⚡ <span id="urgentCount">0</span></div>
+      <button onclick="openCfg()" style="background:rgba(255,255,255,.25);border:none;color:#fff;font-size:20px;width:38px;height:38px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">⚙️</button>
+    </div>
+  </div>
+  <div class="sync-bar local" id="syncBar">
+    <span style="display:flex;align-items:center;gap:6px"><span class="sync-dot"></span><span id="syncMsg">Solo locale — configura Firebase per sync</span></span>
+    <button onclick="openCfg()">⚙️ Configura</button>
+  </div>
+</div>
+
+<!-- CONFIG MODAL -->
+<div class="modal-bg hidden" id="cfgBg" onclick="if(event.target===this)closeCfg()">
+  <div class="cfg-modal">
+    <div class="modal-handle"></div>
+    <h2 style="font-size:17px;font-weight:700;margin-bottom:6px">⚙️ Configurazione Sync</h2>
+    <p style="font-size:13px;color:var(--gray);margin-bottom:18px">Connetti a Firebase per sincronizzare i task su tutti i dispositivi in tempo reale.</p>
+
+    <div style="background:#eff6ff;border-radius:10px;padding:14px;margin-bottom:18px">
+      <div class="cfg-step"><div class="cfg-step-n">1</div><div>Vai su <a class="cfg-link" href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a> e crea un nuovo progetto (gratuito)</div></div>
+      <div class="cfg-step"><div class="cfg-step-n">2</div><div>Nel progetto: <strong>Build → Realtime Database → Create Database</strong> (scegli "Start in test mode")</div></div>
+      <div class="cfg-step"><div class="cfg-step-n">3</div><div>Copia l'URL del database (tipo: <code style="background:#dbeafe;padding:1px 5px;border-radius:3px;font-size:12px">https://nome-rtdb.firebaseio.com</code>)</div></div>
+      <div class="cfg-step"><div class="cfg-step-n">4</div><div>Incollalo qui sotto e tocca <strong>Connetti</strong></div></div>
+    </div>
+
+    <div class="form-group">
+      <label>URL Firebase Realtime Database</label>
+      <input type="url" id="cfgUrl" placeholder="https://nome-progetto-default-rtdb.firebaseio.com" autocomplete="off" style="font-size:13px">
+    </div>
+    <div id="cfgStatus" style="font-size:13px;margin-bottom:12px;min-height:20px"></div>
+    <div style="display:flex;gap:10px">
+      <button class="btn btn-cancel" onclick="closeCfg()">Chiudi</button>
+      <button class="btn btn-save" onclick="saveAndConnect()">🔗 Connetti</button>
+    </div>
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12px;color:var(--gray)">Rimuovi connessione e usa solo locale</span>
+      <button class="btn" style="background:#fef2f2;color:var(--red);font-size:12px;padding:8px 14px;flex:none" onclick="disconnectFirebase()">🗑️ Disconnetti</button>
     </div>
   </div>
 </div>
@@ -252,17 +302,112 @@ let filter='all';
 let editId=null;
 let selTypeVal='consegna';
 let posPopupTaskId=null;
+let fbUrl='';         // Firebase DB URL
+let syncTimer=null;   // debounce timer per sync
 
 // Fix toggle colors
 document.getElementById('fDone').parentElement.querySelector('.toggle-slider').style.cssText='';
 
-// ── STORAGE ──────────────────────────────────────────
-function save(){localStorage.setItem('tsk_v2',JSON.stringify(tasks));}
-function load(){
+// ── FIREBASE SYNC ─────────────────────────────────────
+function getFbUrl(){return (localStorage.getItem('trsp_firebase')||'').replace(/\/+$/,'');}
+
+function setSyncStatus(state,msg){
+  const bar=document.getElementById('syncBar');
+  const txt=document.getElementById('syncMsg');
+  bar.className='sync-bar '+state;
+  txt.textContent=msg;
+}
+
+async function loadFromServer(){
+  fbUrl=getFbUrl();
+  if(!fbUrl){loadLocal();setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');return;}
+  setSyncStatus('syncing','Sincronizzazione…');
+  try{
+    const r=await fetch(fbUrl+'/tasks.json');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const data=await r.json();
+    if(data&&typeof data==='object'){
+      tasks=Array.isArray(data)?data.filter(Boolean):Object.values(data).filter(Boolean);
+    } else {
+      tasks=[];
+    }
+    saveLocal();
+    compact();
+    setSyncStatus('ok','✓ Sincronizzato · '+new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}));
+  }catch(e){
+    loadLocal();
+    setSyncStatus('err','⚠ Errore sync — dati locali');
+  }
+}
+
+async function saveToServer(){
+  saveLocal();
+  fbUrl=getFbUrl();
+  if(!fbUrl) return;
+  setSyncStatus('syncing','Salvataggio…');
+  try{
+    const r=await fetch(fbUrl+'/tasks.json',{
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(tasks)
+    });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    setSyncStatus('ok','✓ Sincronizzato · '+new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}));
+  }catch(e){
+    setSyncStatus('err','⚠ Errore sync — salvato solo in locale');
+  }
+}
+
+// Salvataggio con debounce (evita troppe chiamate in rapida successione)
+function save(){
+  saveLocal();
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(()=>saveToServer(),600);
+}
+
+// ── LOCAL STORAGE ─────────────────────────────────────
+function saveLocal(){localStorage.setItem('tsk_v2',JSON.stringify(tasks));}
+function loadLocal(){
   try{tasks=JSON.parse(localStorage.getItem('tsk_v2')||'[]');}
   catch(e){tasks=[];}
   compact();
 }
+
+// ── CONFIG MODAL ──────────────────────────────────────
+function openCfg(){
+  document.getElementById('cfgUrl').value=getFbUrl();
+  document.getElementById('cfgStatus').textContent='';
+  document.getElementById('cfgBg').classList.remove('hidden');
+}
+function closeCfg(){document.getElementById('cfgBg').classList.add('hidden');}
+
+async function saveAndConnect(){
+  const url=document.getElementById('cfgUrl').value.trim().replace(/\/+$/,'');
+  const st=document.getElementById('cfgStatus');
+  if(!url){st.textContent='⚠ Inserisci un URL valido';st.style.color='var(--red)';return;}
+  st.textContent='🔄 Verifica connessione…';st.style.color='var(--gray)';
+  try{
+    const r=await fetch(url+'/tasks.json');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    localStorage.setItem('trsp_firebase',url);
+    fbUrl=url;
+    st.textContent='✅ Connessione riuscita!';st.style.color='var(--green)';
+    setTimeout(()=>{closeCfg();loadFromServer().then(render);},800);
+  }catch(e){
+    st.textContent='❌ Connessione fallita: '+e.message;st.style.color='var(--red)';
+  }
+}
+
+function disconnectFirebase(){
+  if(!confirm('Rimuovere la connessione Firebase? I dati rimarranno in locale.')) return;
+  localStorage.removeItem('trsp_firebase');
+  fbUrl='';
+  closeCfg();
+  setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');
+}
+
+// ── INIT LOAD ─────────────────────────────────────────
+function load(){loadFromServer().then(render);}
 
 // ── ID / HELPERS ─────────────────────────────────────
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
@@ -494,7 +639,7 @@ document.addEventListener('keydown',e=>{
 });
 
 // ── INIT ─────────────────────────────────────────────
-load();render();
+load(); // carica da Firebase o locale, poi chiama render()
 </script>
 </body>
 </html>
