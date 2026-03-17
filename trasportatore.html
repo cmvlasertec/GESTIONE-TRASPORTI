@@ -382,19 +382,24 @@ function openCfg(){
 function closeCfg(){document.getElementById('cfgBg').classList.add('hidden');}
 
 async function saveAndConnect(){
-  const url=document.getElementById('cfgUrl').value.trim().replace(/\/+$/,'');
+  let url=document.getElementById('cfgUrl').value.trim().replace(/\/+$/,'');
   const st=document.getElementById('cfgStatus');
   if(!url){st.textContent='⚠ Inserisci un URL valido';st.style.color='var(--red)';return;}
-  st.textContent='🔄 Verifica connessione…';st.style.color='var(--gray)';
+  // Auto-fix: per database europei il dominio corretto è .firebasedatabase.app
+  if(url.includes('.europe-west1.firebaseio.com')){
+    url=url.replace('.europe-west1.firebaseio.com','.europe-west1.firebasedatabase.app');
+    document.getElementById('cfgUrl').value=url;
+  }
+  st.innerHTML='🔄 Verifica connessione…<br><small style="color:#666">URL: '+url+'/tasks.json</small>';st.style.color='var(--gray)';
   try{
-    const r=await fetch(url+'/tasks.json');
+    const r=await fetch(url+'/tasks.json',{method:'GET',headers:{'Accept':'application/json'}});
     if(!r.ok) throw new Error('HTTP '+r.status);
     localStorage.setItem('trsp_firebase',url);
     fbUrl=url;
     st.textContent='✅ Connessione riuscita!';st.style.color='var(--green)';
     setTimeout(()=>{closeCfg();loadFromServer().then(render);},800);
   }catch(e){
-    st.textContent='❌ Connessione fallita: '+e.message;st.style.color='var(--red)';
+    st.innerHTML='❌ Connessione fallita: '+e.message+'<br><small style="color:#666">Verifica che l\'URL sia corretto nella console Firebase → Realtime Database</small>';st.style.color='var(--red)';
   }
 }
 
