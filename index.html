@@ -140,6 +140,14 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
 .btn-save{background:var(--blue);color:#fff;box-shadow:0 4px 12px rgba(26,86,219,.3)}
 .btn-delete{background:var(--red-bg);color:var(--red);border:2px solid var(--red-b)}
 
+/* CESTINO */
+.task.trashed{opacity:.7;background:#fff5f5;border-color:#fecaca}
+.task.trashed .task-title{color:var(--gray)}
+.task.trashed .pos-badge{background:var(--red)}
+.trash-bar{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:#fef2f2;border-bottom:2px solid var(--red-b);font-size:13px;color:var(--red);font-weight:600}
+.trash-bar button{background:var(--red);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer}
+.ta-btn.restore{color:var(--green)}
+
 /* UTIL */
 .hidden{display:none!important}
 
@@ -217,6 +225,13 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
   <button class="fb" onclick="setFilter('urgent',this)">⚡ Urgenti</button>
   <button class="fb" onclick="setFilter('consegna',this)">📦 Consegna</button>
   <button class="fb" onclick="setFilter('ritiro',this)">🔄 Ritiro</button>
+  <button class="fb" id="fbCestino" onclick="setFilter('cestino',this)">🗑️ Cestino</button>
+</div>
+
+<!-- TRASH BAR (visible only in cestino view) -->
+<div class="trash-bar hidden" id="trashBar">
+  <span id="trashBarMsg">🗑️ Giri cancellati</span>
+  <button onclick="svuotaCestino()">🗑️ Svuota cestino</button>
 </div>
 
 <!-- TASK LIST -->
@@ -298,6 +313,7 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
 <script>
 // ── STATE ──────────────────────────────────────────────
 let tasks=[];
+let deletedTasks=[];  // cestino giri cancellati
 let filter='all';
 let editId=null;
 let selTypeVal='consegna';
@@ -323,13 +339,19 @@ async function loadFromServer(){
   if(!fbUrl){loadLocal();setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');return;}
   setSyncStatus('syncing','Sincronizzazione…');
   try{
-    const r=await fetch(fbUrl+'/tasks.json');
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const data=await r.json();
+    const [r1,r2]=await Promise.all([fetch(fbUrl+'/tasks.json'),fetch(fbUrl+'/deletedTasks.json')]);
+    if(!r1.ok) throw new Error('HTTP '+r1.status);
+    const data=await r1.json();
     if(data&&typeof data==='object'){
       tasks=Array.isArray(data)?data.filter(Boolean):Object.values(data).filter(Boolean);
     } else {
       tasks=[];
+    }
+    if(r2.ok){
+      const del=await r2.json();
+      if(del&&typeof del==='object'){
+        deletedTasks=Array.isArray(del)?del.filter(Boolean):Object.values(del).filter(Boolean);
+      } else {deletedTasks=[];}
     }
     saveLocal();
     compact();
@@ -346,12 +368,11 @@ async function saveToServer(){
   if(!fbUrl) return;
   setSyncStatus('syncing','Salvataggio…');
   try{
-    const r=await fetch(fbUrl+'/tasks.json',{
-      method:'PUT',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(tasks)
-    });
-    if(!r.ok) throw new Error('HTTP '+r.status);
+    const [r1,r2]=await Promise.all([
+      fetch(fbUrl+'/tasks.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(tasks)}),
+      fetch(fbUrl+'/deletedTasks.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(deletedTasks)})
+    ]);
+    if(!r1.ok) throw new Error('HTTP '+r1.status);
     setSyncStatus('ok','✓ Sincronizzato · '+new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}));
   }catch(e){
     setSyncStatus('err','⚠ Errore sync — salvato solo in locale');
@@ -366,10 +387,15 @@ function save(){
 }
 
 // ── LOCAL STORAGE ─────────────────────────────────────
-function saveLocal(){localStorage.setItem('tsk_v2',JSON.stringify(tasks));}
+function saveLocal(){
+  localStorage.setItem('tsk_v2',JSON.stringify(tasks));
+  localStorage.setItem('tsk_deleted_v2',JSON.stringify(deletedTasks));
+}
 function loadLocal(){
   try{tasks=JSON.parse(localStorage.getItem('tsk_v2')||'[]');}
   catch(e){tasks=[];}
+  try{deletedTasks=JSON.parse(localStorage.getItem('tsk_deleted_v2')||'[]');}
+  catch(e){deletedTasks=[];}
   compact();
 }
 
@@ -382,19 +408,24 @@ function openCfg(){
 function closeCfg(){document.getElementById('cfgBg').classList.add('hidden');}
 
 async function saveAndConnect(){
-  const url=document.getElementById('cfgUrl').value.trim().replace(/\/+$/,'');
+  let url=document.getElementById('cfgUrl').value.trim().replace(/\/+$/,'');
   const st=document.getElementById('cfgStatus');
   if(!url){st.textContent='⚠ Inserisci un URL valido';st.style.color='var(--red)';return;}
-  st.textContent='🔄 Verifica connessione…';st.style.color='var(--gray)';
+  // Auto-fix: per database europei il dominio corretto è .firebasedatabase.app
+  if(url.includes('.europe-west1.firebaseio.com')){
+    url=url.replace('.europe-west1.firebaseio.com','.europe-west1.firebasedatabase.app');
+    document.getElementById('cfgUrl').value=url;
+  }
+  st.innerHTML='🔄 Verifica connessione…<br><small style="color:#666">URL: '+url+'/tasks.json</small>';st.style.color='var(--gray)';
   try{
-    const r=await fetch(url+'/tasks.json');
+    const r=await fetch(url+'/tasks.json',{method:'GET',headers:{'Accept':'application/json'}});
     if(!r.ok) throw new Error('HTTP '+r.status);
     localStorage.setItem('trsp_firebase',url);
     fbUrl=url;
     st.textContent='✅ Connessione riuscita!';st.style.color='var(--green)';
     setTimeout(()=>{closeCfg();loadFromServer().then(render);},800);
   }catch(e){
-    st.textContent='❌ Connessione fallita: '+e.message;st.style.color='var(--red)';
+    st.innerHTML='❌ Connessione fallita: '+e.message+'<br><small style="color:#666">Verifica che l\'URL sia corretto nella console Firebase → Realtime Database</small>';st.style.color='var(--red)';
   }
 }
 
@@ -446,10 +477,14 @@ function setFilter(f,btn){
   document.querySelectorAll('.fb').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
   if(f==='urgent') btn.classList.add('urgent'); else btn.classList.remove('urgent');
+  // Mostra/nasconde il FAB e la trashBar in base al filtro
+  document.querySelector('.fab').style.display=(f==='cestino')?'none':'flex';
+  document.getElementById('trashBar').classList.toggle('hidden',f!=='cestino');
   render();
 }
 
 function filtered(){
+  if(filter==='cestino') return deletedTasks.slice().sort((a,b)=>(b.deletedAt||0)-(a.deletedAt||0));
   const s=tasks.slice().sort((a,b)=>a.pos-b.pos);
   switch(filter){
     case 'pending':  return s.filter(t=>!t.done);
@@ -473,10 +508,49 @@ function render(){
   document.getElementById('urgentCount').textContent=urgent;
   urgent>0?bu.classList.remove('hidden'):bu.classList.add('hidden');
 
+  // Cestino badge
+  const fbCestino=document.getElementById('fbCestino');
+  fbCestino.textContent='🗑️ Cestino'+(deletedTasks.length>0?' ('+deletedTasks.length+')':'');
+
+  // Trash bar message
+  if(filter==='cestino'){
+    document.getElementById('trashBarMsg').textContent=
+      deletedTasks.length>0?`🗑️ ${deletedTasks.length} giro/i cancellati — puoi ripristinarli`:'🗑️ Cestino vuoto';
+  }
+
   if(!rows.length){
-    list.innerHTML=`<div class="empty"><div class="ico">${filter==='done'?'🎉':'📋'}</div>
-      <p>${filter==='done'?'Nessun task completato':'Nessun task da mostrare'}</p>
-      <small>${filter==='all'?'Tocca + per aggiungere il primo task':''}</small></div>`;
+    list.innerHTML=`<div class="empty">
+      <div class="ico">${filter==='done'?'🎉':filter==='cestino'?'🗑️':'📋'}</div>
+      <p>${filter==='done'?'Nessun task completato':filter==='cestino'?'Cestino vuoto':'Nessun task da mostrare'}</p>
+      <small>${filter==='all'?'Tocca + per aggiungere il primo task':filter==='cestino'?'I giri cancellati appariranno qui':''}</small></div>`;
+    return;
+  }
+
+  if(filter==='cestino'){
+    list.innerHTML=rows.map(t=>{
+      const typeBadge={
+        consegna:`<span class="badge badge-consegna">📦 Consegna</span>`,
+        ritiro:`<span class="badge badge-ritiro">🔄 Ritiro</span>`,
+        entrambi:`<span class="badge badge-entrambi">📦🔄 Entrambi</span>`
+      }[t.type]||'';
+      const delDate=t.deletedAt?new Date(t.deletedAt).toLocaleDateString('it-IT',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+      const notesHtml=t.notes?`<div class="task-notes" id="notes-${t.id}">${esc(t.notes)}</div>`:'';
+      return `
+      <div class="task trashed" id="task-${t.id}">
+        <div class="task-top">
+          <div class="pos-badge" style="cursor:default;font-size:18px">🗑️</div>
+          <div class="task-main">
+            <div class="task-title">${esc(t.addr)}</div>
+            <div class="task-meta">${typeBadge}<span class="badge" style="background:#f3f4f6;color:#6b7280">Cancellato ${delDate}</span></div>
+          </div>
+        </div>
+        ${notesHtml}
+        <div class="task-actions">
+          <button class="ta-btn restore" onclick="restoreTask('${t.id}')">↩️ Ripristina</button>
+          <button class="ta-btn del" onclick="permanentDelete('${t.id}')">🗑️ Elimina def.</button>
+        </div>
+      </div>`;
+    }).join('');
     return;
   }
 
@@ -526,9 +600,38 @@ function toggleNotes(id){
 }
 
 function deleteTask(id){
-  if(!confirm('Eliminare questo task?')) return;
-  tasks=tasks.filter(t=>t.id!==id);
+  const t=tasks.find(t=>t.id===id);
+  if(!t) return;
+  if(!confirm('Spostare "'+t.addr.substring(0,40)+'" nel cestino?')) return;
+  tasks=tasks.filter(x=>x.id!==id);
+  deletedTasks.unshift({...t,deletedAt:Date.now()});
   compact();save();render();
+}
+
+function restoreTask(id){
+  const t=deletedTasks.find(t=>t.id===id);
+  if(!t) return;
+  deletedTasks=deletedTasks.filter(x=>x.id!==id);
+  const restored={...t};
+  delete restored.deletedAt;
+  restored.pos=tasks.length+1;
+  tasks.push(restored);
+  compact();save();render();
+}
+
+function permanentDelete(id){
+  const t=deletedTasks.find(t=>t.id===id);
+  if(!t) return;
+  if(!confirm('Eliminare definitivamente "'+t.addr.substring(0,40)+'"? Non sarà recuperabile.')) return;
+  deletedTasks=deletedTasks.filter(x=>x.id!==id);
+  save();render();
+}
+
+function svuotaCestino(){
+  if(!deletedTasks.length) return;
+  if(!confirm('Svuotare il cestino? Tutti i '+deletedTasks.length+' giri cancellati saranno eliminati definitivamente.')) return;
+  deletedTasks=[];
+  save();render();
 }
 
 // ── POS POPUP ────────────────────────────────────────
