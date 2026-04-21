@@ -321,6 +321,15 @@ let posPopupTaskId=null;
 let fbUrl='';         // Firebase DB URL
 let syncTimer=null;   // debounce timer per sync
 
+// Per sync diff-based + real-time (evita race condition multi-utente)
+let lastSyncedTasks=[];       // snapshot dell'ultimo stato confermato sul server
+let lastSyncedDeleted=[];
+let tasksES=null;             // EventSource stream per tasks
+let deletedES=null;           // EventSource stream per deletedTasks
+let pendingIdsTasks=new Set();    // id in fase di scrittura (per ignorare l'eco della nostra stessa PATCH)
+let pendingIdsDeleted=new Set();
+let esReconnectTimer=null;
+
 // Fix toggle colors
 document.getElementById('fDone').parentElement.querySelector('.toggle-slider').style.cssText='';
 
@@ -334,48 +343,259 @@ function setSyncStatus(state,msg){
   txt.textContent=msg;
 }
 
+function nowHHMM(){return new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});}
+
+// Converte la risposta di Firebase (array o oggetto o null) in array pulito
+function parseCollection(data){
+  if(!data||typeof data!=='object') return [];
+  if(Array.isArray(data)) return data.filter(Boolean);
+  return Object.values(data).filter(Boolean);
+}
+
+// Confronto strutturale tra due task (ignora l'ordine delle chiavi)
+function sameTask(a,b){
+  if(!a||!b) return false;
+  const ka=Object.keys(a), kb=Object.keys(b);
+  if(ka.length!==kb.length) return false;
+  for(const k of ka){
+    if(JSON.stringify(a[k])!==JSON.stringify(b[k])) return false;
+  }
+  return true;
+}
+
+// Calcola solo le differenze tra l'ultimo stato noto del server e lo stato locale corrente.
+// Output: oggetto {id: task} (con valore null per eliminazioni) pronto per una PATCH Firebase.
+function buildPatch(lastSyncedArr,currentArr){
+  const byLast=new Map((lastSyncedArr||[]).map(t=>[t.id,t]));
+  const byCur=new Map((currentArr||[]).map(t=>[t.id,t]));
+  const patch={};
+  for(const [id] of byLast){
+    if(!byCur.has(id)) patch[id]=null;          // eliminato localmente
+  }
+  for(const [id,t] of byCur){
+    const old=byLast.get(id);
+    if(!old||!sameTask(old,t)) patch[id]=t;     // nuovo o modificato localmente
+  }
+  return patch;
+}
+
+// Applica un patch all'array "lastSynced" per-id (non sovrascrive interamente:
+// preserva aggiornamenti arrivati da altri utenti via stream nel frattempo).
+function applyPatchToLastSynced(arr,patch){
+  const byId=new Map(arr.map(t=>[t.id,t]));
+  for(const [id,val] of Object.entries(patch)){
+    if(val===null) byId.delete(id);
+    else byId.set(id,{...val});
+  }
+  return Array.from(byId.values());
+}
+
 async function loadFromServer(){
   fbUrl=getFbUrl();
   if(!fbUrl){loadLocal();setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');return;}
   setSyncStatus('syncing','Sincronizzazione…');
+  stopStreaming();
   try{
     const [r1,r2]=await Promise.all([fetch(fbUrl+'/tasks.json'),fetch(fbUrl+'/deletedTasks.json')]);
     if(!r1.ok) throw new Error('HTTP '+r1.status);
     const data=await r1.json();
-    if(data&&typeof data==='object'){
-      tasks=Array.isArray(data)?data.filter(Boolean):Object.values(data).filter(Boolean);
-    } else {
-      tasks=[];
-    }
+    tasks=parseCollection(data);
     if(r2.ok){
       const del=await r2.json();
-      if(del&&typeof del==='object'){
-        deletedTasks=Array.isArray(del)?del.filter(Boolean):Object.values(del).filter(Boolean);
-      } else {deletedTasks=[];}
+      deletedTasks=parseCollection(del);
+    } else {
+      deletedTasks=[];
     }
+    lastSyncedTasks=tasks.map(t=>({...t}));
+    lastSyncedDeleted=deletedTasks.map(t=>({...t}));
     saveLocal();
     compact();
-    setSyncStatus('ok','✓ Sincronizzato · '+new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}));
+    startStreaming();
+    setSyncStatus('ok','✓ Sincronizzato · '+nowHHMM());
   }catch(e){
     loadLocal();
     setSyncStatus('err','⚠ Errore sync — dati locali');
   }
 }
 
+// Salva solo le differenze rispetto all'ultimo stato noto del server.
+// Usa PATCH (merge) invece di PUT (overwrite) → non sovrascrive i task aggiunti da altri utenti.
 async function saveToServer(){
   saveLocal();
   fbUrl=getFbUrl();
   if(!fbUrl) return;
+
+  const tPatch=buildPatch(lastSyncedTasks,tasks);
+  const dPatch=buildPatch(lastSyncedDeleted,deletedTasks);
+  const tKeys=Object.keys(tPatch);
+  const dKeys=Object.keys(dPatch);
+  if(tKeys.length===0&&dKeys.length===0) return;
+
+  // Marca gli id in-flight per ignorare l'eco della nostra stessa scrittura
+  tKeys.forEach(id=>pendingIdsTasks.add(id));
+  dKeys.forEach(id=>pendingIdsDeleted.add(id));
+
   setSyncStatus('syncing','Salvataggio…');
   try{
-    const [r1,r2]=await Promise.all([
-      fetch(fbUrl+'/tasks.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(tasks)}),
-      fetch(fbUrl+'/deletedTasks.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(deletedTasks)})
-    ]);
-    if(!r1.ok) throw new Error('HTTP '+r1.status);
-    setSyncStatus('ok','✓ Sincronizzato · '+new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}));
+    const promises=[];
+    if(tKeys.length){
+      promises.push(fetch(fbUrl+'/tasks.json',{
+        method:'PATCH',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(tPatch)
+      }));
+    }
+    if(dKeys.length){
+      promises.push(fetch(fbUrl+'/deletedTasks.json',{
+        method:'PATCH',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(dPatch)
+      }));
+    }
+    const results=await Promise.all(promises);
+    for(const r of results){if(!r.ok) throw new Error('HTTP '+r.status);}
+    // Aggiorna lastSynced SOLO per gli id effettivamente scritti
+    // (così preserviamo gli update arrivati via stream nel frattempo per altri id).
+    lastSyncedTasks=applyPatchToLastSynced(lastSyncedTasks,tPatch);
+    lastSyncedDeleted=applyPatchToLastSynced(lastSyncedDeleted,dPatch);
+    setSyncStatus('ok','✓ Sincronizzato · '+nowHHMM());
   }catch(e){
+    // In caso di errore, lasciamo lastSynced invariato: al prossimo save() il diff
+    // ri-includerà queste modifiche → retry automatico.
     setSyncStatus('err','⚠ Errore sync — salvato solo in locale');
+  }finally{
+    tKeys.forEach(id=>pendingIdsTasks.delete(id));
+    dKeys.forEach(id=>pendingIdsDeleted.delete(id));
+  }
+}
+
+// ── REAL-TIME STREAMING (Firebase SSE) ────────────────
+// Usa Server-Sent Events per ricevere le modifiche degli altri utenti senza refresh.
+// Doc: https://firebase.google.com/docs/reference/rest/database#section-streaming
+function startStreaming(){
+  stopStreaming();
+  if(!fbUrl) return;
+  try{
+    tasksES=new EventSource(fbUrl+'/tasks.json');
+    ['put','patch'].forEach(ev=>tasksES.addEventListener(ev,e=>applyStreamEvent(e,'tasks')));
+    tasksES.addEventListener('keep-alive',()=>{});
+    tasksES.addEventListener('cancel',()=>{});
+    tasksES.addEventListener('auth_revoked',()=>{});
+    tasksES.onerror=()=>scheduleStreamReconnect();
+
+    deletedES=new EventSource(fbUrl+'/deletedTasks.json');
+    ['put','patch'].forEach(ev=>deletedES.addEventListener(ev,e=>applyStreamEvent(e,'deletedTasks')));
+    deletedES.onerror=()=>scheduleStreamReconnect();
+  }catch(e){
+    console.warn('Stream non disponibile',e);
+  }
+}
+
+function stopStreaming(){
+  clearTimeout(esReconnectTimer);
+  if(tasksES){try{tasksES.close();}catch(e){} tasksES=null;}
+  if(deletedES){try{deletedES.close();}catch(e){} deletedES=null;}
+}
+
+function scheduleStreamReconnect(){
+  clearTimeout(esReconnectTimer);
+  esReconnectTimer=setTimeout(()=>{
+    if(fbUrl){setSyncStatus('syncing','Riconnessione sync…');startStreaming();}
+  },3000);
+}
+
+// Applica un evento di stream (put/patch) allo stato locale.
+// - Ignora gli eventi per id "pendenti" (cioè appena scritti da noi) per evitare di
+//   sovrascrivere modifiche locali più recenti con l'eco della nostra precedente PATCH.
+function applyStreamEvent(evt,which){
+  try{
+    const msg=JSON.parse(evt.data);
+    const rawPath=(msg.path||'/');
+    const data=msg.data;
+    const isTasks=(which==='tasks');
+    const pending=isTasks?pendingIdsTasks:pendingIdsDeleted;
+
+    // path puó essere "/", "/idX", "/idX/campo"
+    const pathParts=rawPath.split('/').filter(Boolean);
+
+    const getArr=()=>isTasks?tasks:deletedTasks;
+    const setArr=(v)=>{if(isTasks) tasks=v; else deletedTasks=v;};
+    const getLast=()=>isTasks?lastSyncedTasks:lastSyncedDeleted;
+    const setLast=(v)=>{if(isTasks) lastSyncedTasks=v; else lastSyncedDeleted=v;};
+
+    if(pathParts.length===0){
+      // Evento sulla radice dell'intera collection
+      const incoming=parseCollection(data);
+      if(evt.type==='put'){
+        // Replace completo: preserva gli item con modifiche locali non ancora confermate
+        const curArr=getArr();
+        const pendingItems=curArr.filter(t=>pending.has(t.id));
+        const incomingById=new Map(incoming.map(t=>[t.id,t]));
+        pendingItems.forEach(t=>incomingById.set(t.id,t));
+        setArr(Array.from(incomingById.values()));
+        // lastSynced riflette lo stato del server (senza i pending)
+        setLast(incoming.map(t=>({...t})));
+      } else if(evt.type==='patch'){
+        // Patch sulla radice: data = {id1: {...}, id2: null, ...}
+        if(data&&typeof data==='object'){
+          let arr=getArr().slice();
+          let last=getLast().slice();
+          for(const [id,val] of Object.entries(data)){
+            if(val===null){
+              if(!pending.has(id)) arr=arr.filter(t=>t.id!==id);
+              last=last.filter(t=>t.id!==id);
+            } else {
+              if(!pending.has(id)){
+                const i=arr.findIndex(t=>t.id===id);
+                if(i>=0) arr[i]=val; else arr.push(val);
+              }
+              const li=last.findIndex(t=>t.id===id);
+              if(li>=0) last[li]={...val}; else last.push({...val});
+            }
+          }
+          setArr(arr);
+          setLast(last);
+        }
+      }
+    } else {
+      // Evento su un figlio specifico: path = "/idX" (o "/idX/campo", raro)
+      const id=pathParts[0];
+      if(pathParts.length===1){
+        if(evt.type==='put'){
+          let arr=getArr().slice();
+          let last=getLast().slice();
+          if(data===null){
+            if(!pending.has(id)) arr=arr.filter(t=>t.id!==id);
+            last=last.filter(t=>t.id!==id);
+          } else {
+            if(!pending.has(id)){
+              const i=arr.findIndex(t=>t.id===id);
+              if(i>=0) arr[i]=data; else arr.push(data);
+            }
+            const li=last.findIndex(t=>t.id===id);
+            if(li>=0) last[li]={...data}; else last.push({...data});
+          }
+          setArr(arr);
+          setLast(last);
+        } else if(evt.type==='patch'&&data&&typeof data==='object'){
+          // Patch parziale di un singolo task
+          if(!pending.has(id)){
+            const arr=getArr();
+            const i=arr.findIndex(t=>t.id===id);
+            if(i>=0) arr[i]={...arr[i],...data};
+          }
+          const last=getLast();
+          const li=last.findIndex(t=>t.id===id);
+          if(li>=0) last[li]={...last[li],...data};
+        }
+      }
+      // Path più profondi (campo singolo) sono ignorati: la nostra app scrive sempre l'intero task.
+    }
+
+    compact();
+    saveLocal();
+    render();
+    setSyncStatus('ok','✓ Sincronizzato · '+nowHHMM());
+  }catch(e){
+    console.error('Errore applicazione evento stream',e,evt);
   }
 }
 
@@ -433,6 +653,11 @@ function disconnectFirebase(){
   if(!confirm('Rimuovere la connessione Firebase? I dati rimarranno in locale.')) return;
   localStorage.removeItem('trsp_firebase');
   fbUrl='';
+  stopStreaming();
+  lastSyncedTasks=[];
+  lastSyncedDeleted=[];
+  pendingIdsTasks.clear();
+  pendingIdsDeleted.clear();
   closeCfg();
   setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');
 }
@@ -444,7 +669,10 @@ function load(){loadFromServer().then(render);}
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
 
 function compact(){
-  tasks.sort((a,b)=>a.pos-b.pos);
+  // Ordinamento deterministico con tiebreaker su createdAt e id:
+  // se due utenti assegnano concorrentemente la stessa posizione a task diversi,
+  // tutti i client convergono allo stesso ordinamento finale.
+  tasks.sort((a,b)=>(a.pos-b.pos)||((a.createdAt||0)-(b.createdAt||0))||(a.id<b.id?-1:1));
   tasks.forEach((t,i)=>t.pos=i+1);
 }
 
