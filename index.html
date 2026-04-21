@@ -160,6 +160,18 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
 .sync-dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex-shrink:0}
 .sync-bar button{background:rgba(255,255,255,.2);border:none;color:inherit;font-size:11px;font-weight:700;padding:3px 8px;border-radius:10px;cursor:pointer}
 
+/* TOAST NOTIFICA MODIFICHE REMOTE */
+#toastStack{position:fixed;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top,0px) + 10px);display:flex;flex-direction:column;gap:8px;z-index:9999;pointer-events:none;width:calc(100% - 24px);max-width:440px}
+.toast{pointer-events:auto;background:#1e40af;color:#fff;padding:12px 14px;border-radius:12px;font-size:13px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.28);display:flex;align-items:center;gap:10px;animation:toastIn .25s ease}
+.toast.warn{background:#b45309}
+.toast.err{background:#b91c1c}
+.toast .tbody{flex:1;line-height:1.35}
+.toast .tsmall{display:block;font-weight:500;opacity:.9;font-size:11.5px;margin-top:2px}
+.toast .tx{background:rgba(255,255,255,.22);border:none;color:inherit;width:26px;height:26px;border-radius:50%;cursor:pointer;font-size:14px;font-weight:800;flex-shrink:0}
+@keyframes toastIn{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}}
+.toast.out{animation:toastOut .2s ease forwards}
+@keyframes toastOut{to{transform:translateY(-8px);opacity:0}}
+
 /* CONFIG MODAL */
 .cfg-modal{background:#fff;border-radius:24px 24px 0 0;padding:24px 20px calc(24px + env(safe-area-inset-bottom,0px));width:100%;max-width:600px;animation:slideUp .25s ease}
 .cfg-step{display:flex;align-items:flex-start;gap:10px;margin-bottom:14px;font-size:14px;line-height:1.5}
@@ -186,6 +198,9 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
     <button onclick="openCfg()">⚙️ Configura</button>
   </div>
 </div>
+
+<!-- TOAST STACK per notifiche modifiche remote -->
+<div id="toastStack"></div>
 
 <!-- CONFIG MODAL -->
 <div class="modal-bg hidden" id="cfgBg" onclick="if(event.target===this)closeCfg()">
@@ -321,6 +336,18 @@ let posPopupTaskId=null;
 let fbUrl='';         // Firebase DB URL
 let syncTimer=null;   // debounce timer per sync
 
+// Per sync diff-based + real-time (evita race condition multi-utente)
+let lastSyncedTasks=[];       // snapshot dell'ultimo stato confermato sul server
+let lastSyncedDeleted=[];
+let tasksES=null;             // EventSource stream per tasks
+let deletedES=null;           // EventSource stream per deletedTasks
+let pendingIdsTasks=new Set();    // id in fase di scrittura (per ignorare l'eco della nostra stessa PATCH)
+let pendingIdsDeleted=new Set();
+let esReconnectTimer=null;
+let pollTimer=null;            // polling fallback ogni 15s
+let streamActive=false;        // true quando lo stream SSE ha ricevuto almeno un evento
+let lastStreamAt=0;            // timestamp ultimo evento stream (per decidere se polling necessario)
+
 // Fix toggle colors
 document.getElementById('fDone').parentElement.querySelector('.toggle-slider').style.cssText='';
 
@@ -334,48 +361,413 @@ function setSyncStatus(state,msg){
   txt.textContent=msg;
 }
 
+function nowHHMM(){return new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});}
+
+// ── TOAST (notifica modifiche remote) ─────────────────
+function showToast(title,detail,kind){
+  const stack=document.getElementById('toastStack');
+  if(!stack) return;
+  const el=document.createElement('div');
+  el.className='toast'+(kind?' '+kind:'');
+  const detailHtml=detail?`<span class="tsmall">${detail}</span>`:'';
+  el.innerHTML=`<div class="tbody">🔔 ${title}${detailHtml}</div><button class="tx" aria-label="chiudi">×</button>`;
+  const close=()=>{el.classList.add('out');setTimeout(()=>el.remove(),200);};
+  el.querySelector('.tx').onclick=close;
+  stack.appendChild(el);
+  setTimeout(close,6000);
+}
+
+// Descrizione breve di un task per il toast
+function taskBrief(t){
+  if(!t) return '';
+  const type=t.type==='ritiro'?'Ritiro':'Consegna';
+  const addr=(t.addr||'').toString().slice(0,40);
+  return `${type}${addr?' · '+addr:''}`;
+}
+
+// Calcola cosa è cambiato fra due array di task (usato per il toast)
+function diffCollections(oldArr,newArr){
+  const byOld=new Map((oldArr||[]).map(t=>[t.id,t]));
+  const byNew=new Map((newArr||[]).map(t=>[t.id,t]));
+  const added=[],removed=[],modified=[];
+  for(const [id,t] of byNew){
+    const o=byOld.get(id);
+    if(!o) added.push(t);
+    else if(!sameTask(o,t)) modified.push(t);
+  }
+  for(const [id,t] of byOld){
+    if(!byNew.has(id)) removed.push(t);
+  }
+  return {added,removed,modified};
+}
+
+function notifyRemoteChanges(tasksDiff,delDiff){
+  const a=tasksDiff.added.filter(t=>!pendingIdsTasks.has(t.id));
+  const r=tasksDiff.removed.filter(t=>!pendingIdsTasks.has(t.id));
+  const m=tasksDiff.modified.filter(t=>!pendingIdsTasks.has(t.id));
+  // Eliminati da altri (finiti nel cestino)
+  const movedToTrash=delDiff.added.filter(t=>!pendingIdsDeleted.has(t.id));
+  if(a.length===0&&r.length===0&&m.length===0&&movedToTrash.length===0) return;
+  const parts=[];
+  if(a.length) parts.push(`${a.length} aggiunt${a.length>1?'i':'o'}`);
+  if(m.length) parts.push(`${m.length} modificat${m.length>1?'i':'o'}`);
+  if(movedToTrash.length) parts.push(`${movedToTrash.length} eliminat${movedToTrash.length>1?'i':'o'}`);
+  if(r.length&&!movedToTrash.length) parts.push(`${r.length} rimoss${r.length>1?'i':'o'}`);
+  const sample=a[0]||m[0]||movedToTrash[0];
+  const detail=sample?taskBrief(sample):'';
+  showToast('Modifiche da un altro utente: '+parts.join(', '),detail);
+}
+
+// Converte la risposta di Firebase (array o oggetto o null) in array pulito
+function parseCollection(data){
+  if(!data||typeof data!=='object') return [];
+  if(Array.isArray(data)) return data.filter(Boolean);
+  return Object.values(data).filter(Boolean);
+}
+
+// Confronto strutturale tra due task (ignora l'ordine delle chiavi)
+function sameTask(a,b){
+  if(!a||!b) return false;
+  const ka=Object.keys(a), kb=Object.keys(b);
+  if(ka.length!==kb.length) return false;
+  for(const k of ka){
+    if(JSON.stringify(a[k])!==JSON.stringify(b[k])) return false;
+  }
+  return true;
+}
+
+// Calcola solo le differenze tra l'ultimo stato noto del server e lo stato locale corrente.
+// Output: oggetto {id: task} (con valore null per eliminazioni) pronto per una PATCH Firebase.
+function buildPatch(lastSyncedArr,currentArr){
+  const byLast=new Map((lastSyncedArr||[]).map(t=>[t.id,t]));
+  const byCur=new Map((currentArr||[]).map(t=>[t.id,t]));
+  const patch={};
+  for(const [id] of byLast){
+    if(!byCur.has(id)) patch[id]=null;          // eliminato localmente
+  }
+  for(const [id,t] of byCur){
+    const old=byLast.get(id);
+    if(!old||!sameTask(old,t)) patch[id]=t;     // nuovo o modificato localmente
+  }
+  return patch;
+}
+
+// Applica un patch all'array "lastSynced" per-id (non sovrascrive interamente:
+// preserva aggiornamenti arrivati da altri utenti via stream nel frattempo).
+function applyPatchToLastSynced(arr,patch){
+  const byId=new Map(arr.map(t=>[t.id,t]));
+  for(const [id,val] of Object.entries(patch)){
+    if(val===null) byId.delete(id);
+    else byId.set(id,{...val});
+  }
+  return Array.from(byId.values());
+}
+
 async function loadFromServer(){
   fbUrl=getFbUrl();
   if(!fbUrl){loadLocal();setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');return;}
   setSyncStatus('syncing','Sincronizzazione…');
+  stopStreaming();
   try{
     const [r1,r2]=await Promise.all([fetch(fbUrl+'/tasks.json'),fetch(fbUrl+'/deletedTasks.json')]);
     if(!r1.ok) throw new Error('HTTP '+r1.status);
     const data=await r1.json();
-    if(data&&typeof data==='object'){
-      tasks=Array.isArray(data)?data.filter(Boolean):Object.values(data).filter(Boolean);
-    } else {
-      tasks=[];
-    }
+    tasks=parseCollection(data);
     if(r2.ok){
       const del=await r2.json();
-      if(del&&typeof del==='object'){
-        deletedTasks=Array.isArray(del)?del.filter(Boolean):Object.values(del).filter(Boolean);
-      } else {deletedTasks=[];}
+      deletedTasks=parseCollection(del);
+    } else {
+      deletedTasks=[];
     }
+    lastSyncedTasks=tasks.map(t=>({...t}));
+    lastSyncedDeleted=deletedTasks.map(t=>({...t}));
     saveLocal();
     compact();
-    setSyncStatus('ok','✓ Sincronizzato · '+new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}));
+    streamActive=false;
+    lastStreamAt=0;
+    startStreaming();
+    startPolling();
+    setSyncStatus('ok','✓ Sincronizzato · '+nowHHMM());
   }catch(e){
     loadLocal();
     setSyncStatus('err','⚠ Errore sync — dati locali');
   }
 }
 
+// Fetch-then-merge: legge lo stato corrente del server e incorpora nel locale
+// eventuali modifiche fatte da altri utenti (esclusi gli id che stiamo scrivendo noi).
+// Questo rende il salvataggio sicuro ANCHE se lo stream SSE non funziona.
+async function fetchAndMerge(silent){
+  if(!fbUrl) return false;
+  try{
+    const [r1,r2]=await Promise.all([
+      fetch(fbUrl+'/tasks.json',{cache:'no-store'}),
+      fetch(fbUrl+'/deletedTasks.json',{cache:'no-store'})
+    ]);
+    if(!r1.ok) throw new Error('HTTP '+r1.status);
+    const srvTasks=parseCollection(await r1.json());
+    const srvDeleted=r2.ok?parseCollection(await r2.json()):[];
+
+    // Diff rispetto al nostro "ultimo noto" → così vediamo cosa è cambiato lato server
+    const tDiff=diffCollections(lastSyncedTasks,srvTasks);
+    const dDiff=diffCollections(lastSyncedDeleted,srvDeleted);
+
+    // Integra nel locale tutte le modifiche remote (tranne gli id pendenti che stiamo scrivendo noi).
+    const tasksById=new Map(tasks.map(t=>[t.id,t]));
+    for(const t of [...tDiff.added,...tDiff.modified]){
+      if(!pendingIdsTasks.has(t.id)) tasksById.set(t.id,t);
+    }
+    for(const t of tDiff.removed){
+      if(!pendingIdsTasks.has(t.id)) tasksById.delete(t.id);
+    }
+    tasks=Array.from(tasksById.values());
+
+    const delById=new Map(deletedTasks.map(t=>[t.id,t]));
+    for(const t of [...dDiff.added,...dDiff.modified]){
+      if(!pendingIdsDeleted.has(t.id)) delById.set(t.id,t);
+    }
+    for(const t of dDiff.removed){
+      if(!pendingIdsDeleted.has(t.id)) delById.delete(t.id);
+    }
+    deletedTasks=Array.from(delById.values());
+
+    // Aggiorna lo snapshot lastSynced allo stato reale del server
+    lastSyncedTasks=srvTasks.map(t=>({...t}));
+    lastSyncedDeleted=srvDeleted.map(t=>({...t}));
+
+    compact();
+    saveLocal();
+
+    const hasRemote=(tDiff.added.length+tDiff.modified.length+tDiff.removed.length+dDiff.added.length)>0;
+    if(hasRemote&&!silent){
+      notifyRemoteChanges(tDiff,dDiff);
+      render();
+    }
+    return hasRemote;
+  }catch(e){
+    if(!silent) console.warn('fetchAndMerge error',e);
+    return false;
+  }
+}
+
+// Salva solo le differenze rispetto all'ultimo stato noto del server.
+// Usa PATCH (merge) invece di PUT (overwrite) → non sovrascrive i task aggiunti da altri utenti.
+// Prima di scrivere, fa SEMPRE una fetch-then-merge: così eventuali task aggiunti da
+// altri utenti vengono integrati nel locale (e nel lastSynced) e il diff che calcoliamo
+// conterrà SOLO le modifiche locali reali → zero sovrascritture.
 async function saveToServer(){
   saveLocal();
   fbUrl=getFbUrl();
   if(!fbUrl) return;
+
+  // Pre-merge: allinea lastSynced con lo stato reale del server
+  setSyncStatus('syncing','Controllo aggiornamenti…');
+  await fetchAndMerge(false);
+
+  const tPatch=buildPatch(lastSyncedTasks,tasks);
+  const dPatch=buildPatch(lastSyncedDeleted,deletedTasks);
+  const tKeys=Object.keys(tPatch);
+  const dKeys=Object.keys(dPatch);
+  if(tKeys.length===0&&dKeys.length===0){setSyncStatus('ok','✓ Sincronizzato · '+nowHHMM());return;}
+
+  // Marca gli id in-flight per ignorare l'eco della nostra stessa scrittura
+  tKeys.forEach(id=>pendingIdsTasks.add(id));
+  dKeys.forEach(id=>pendingIdsDeleted.add(id));
+
   setSyncStatus('syncing','Salvataggio…');
   try{
-    const [r1,r2]=await Promise.all([
-      fetch(fbUrl+'/tasks.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(tasks)}),
-      fetch(fbUrl+'/deletedTasks.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(deletedTasks)})
-    ]);
-    if(!r1.ok) throw new Error('HTTP '+r1.status);
-    setSyncStatus('ok','✓ Sincronizzato · '+new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}));
+    const promises=[];
+    if(tKeys.length){
+      promises.push(fetch(fbUrl+'/tasks.json',{
+        method:'PATCH',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(tPatch)
+      }));
+    }
+    if(dKeys.length){
+      promises.push(fetch(fbUrl+'/deletedTasks.json',{
+        method:'PATCH',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(dPatch)
+      }));
+    }
+    const results=await Promise.all(promises);
+    for(const r of results){if(!r.ok) throw new Error('HTTP '+r.status);}
+    // Aggiorna lastSynced SOLO per gli id effettivamente scritti
+    // (così preserviamo gli update arrivati via stream nel frattempo per altri id).
+    lastSyncedTasks=applyPatchToLastSynced(lastSyncedTasks,tPatch);
+    lastSyncedDeleted=applyPatchToLastSynced(lastSyncedDeleted,dPatch);
+    setSyncStatus('ok','✓ Sincronizzato · '+nowHHMM());
   }catch(e){
+    // In caso di errore, lasciamo lastSynced invariato: al prossimo save() il diff
+    // ri-includerà queste modifiche → retry automatico.
     setSyncStatus('err','⚠ Errore sync — salvato solo in locale');
+  }finally{
+    tKeys.forEach(id=>pendingIdsTasks.delete(id));
+    dKeys.forEach(id=>pendingIdsDeleted.delete(id));
+  }
+}
+
+// ── REAL-TIME STREAMING (Firebase SSE) ────────────────
+// Usa Server-Sent Events per ricevere le modifiche degli altri utenti senza refresh.
+// Doc: https://firebase.google.com/docs/reference/rest/database#section-streaming
+function startStreaming(){
+  stopStreaming();
+  if(!fbUrl) return;
+  try{
+    tasksES=new EventSource(fbUrl+'/tasks.json');
+    ['put','patch'].forEach(ev=>tasksES.addEventListener(ev,e=>applyStreamEvent(e,'tasks')));
+    tasksES.addEventListener('keep-alive',()=>{});
+    tasksES.addEventListener('cancel',()=>{});
+    tasksES.addEventListener('auth_revoked',()=>{});
+    tasksES.onerror=()=>scheduleStreamReconnect();
+
+    deletedES=new EventSource(fbUrl+'/deletedTasks.json');
+    ['put','patch'].forEach(ev=>deletedES.addEventListener(ev,e=>applyStreamEvent(e,'deletedTasks')));
+    deletedES.onerror=()=>scheduleStreamReconnect();
+  }catch(e){
+    console.warn('Stream non disponibile',e);
+  }
+}
+
+function stopStreaming(){
+  clearTimeout(esReconnectTimer);
+  if(tasksES){try{tasksES.close();}catch(e){} tasksES=null;}
+  if(deletedES){try{deletedES.close();}catch(e){} deletedES=null;}
+}
+
+function scheduleStreamReconnect(){
+  clearTimeout(esReconnectTimer);
+  esReconnectTimer=setTimeout(()=>{
+    if(fbUrl){setSyncStatus('syncing','Riconnessione sync…');startStreaming();}
+  },3000);
+}
+
+// ── POLLING FALLBACK ──────────────────────────────────
+// Anche se lo stream SSE funziona, facciamo un polling ogni 15s come rete di sicurezza.
+// Se lo stream non ha dato segni di vita da più di 20s → fetchAndMerge.
+function startPolling(){
+  stopPolling();
+  pollTimer=setInterval(async ()=>{
+    if(!fbUrl) return;
+    // Se c'è un salvataggio in corso (id pendenti), rimanda
+    if(pendingIdsTasks.size||pendingIdsDeleted.size) return;
+    const quietFor=Date.now()-lastStreamAt;
+    // Polling ogni ciclo se stream non attivo, altrimenti solo se è silenzioso da >20s
+    if(!streamActive||quietFor>20000){
+      await fetchAndMerge(false);
+    }
+  },15000);
+}
+function stopPolling(){
+  if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+}
+
+// Applica un evento di stream (put/patch) allo stato locale.
+// - Ignora gli eventi per id "pendenti" (cioè appena scritti da noi) per evitare di
+//   sovrascrivere modifiche locali più recenti con l'eco della nostra precedente PATCH.
+function applyStreamEvent(evt,which){
+  try{
+    const msg=JSON.parse(evt.data);
+    const rawPath=(msg.path||'/');
+    const data=msg.data;
+    const isTasks=(which==='tasks');
+    const pending=isTasks?pendingIdsTasks:pendingIdsDeleted;
+
+    // Snapshot prima dell'evento per poter mostrare il toast con le modifiche remote
+    const beforeTasks=tasks.map(t=>({...t}));
+    const beforeDeleted=deletedTasks.map(t=>({...t}));
+
+    // Segna lo stream come attivo → disabilita il polling fallback
+    streamActive=true;
+    lastStreamAt=Date.now();
+
+    // path puó essere "/", "/idX", "/idX/campo"
+    const pathParts=rawPath.split('/').filter(Boolean);
+
+    const getArr=()=>isTasks?tasks:deletedTasks;
+    const setArr=(v)=>{if(isTasks) tasks=v; else deletedTasks=v;};
+    const getLast=()=>isTasks?lastSyncedTasks:lastSyncedDeleted;
+    const setLast=(v)=>{if(isTasks) lastSyncedTasks=v; else lastSyncedDeleted=v;};
+
+    if(pathParts.length===0){
+      // Evento sulla radice dell'intera collection
+      const incoming=parseCollection(data);
+      if(evt.type==='put'){
+        // Replace completo: preserva gli item con modifiche locali non ancora confermate
+        const curArr=getArr();
+        const pendingItems=curArr.filter(t=>pending.has(t.id));
+        const incomingById=new Map(incoming.map(t=>[t.id,t]));
+        pendingItems.forEach(t=>incomingById.set(t.id,t));
+        setArr(Array.from(incomingById.values()));
+        // lastSynced riflette lo stato del server (senza i pending)
+        setLast(incoming.map(t=>({...t})));
+      } else if(evt.type==='patch'){
+        // Patch sulla radice: data = {id1: {...}, id2: null, ...}
+        if(data&&typeof data==='object'){
+          let arr=getArr().slice();
+          let last=getLast().slice();
+          for(const [id,val] of Object.entries(data)){
+            if(val===null){
+              if(!pending.has(id)) arr=arr.filter(t=>t.id!==id);
+              last=last.filter(t=>t.id!==id);
+            } else {
+              if(!pending.has(id)){
+                const i=arr.findIndex(t=>t.id===id);
+                if(i>=0) arr[i]=val; else arr.push(val);
+              }
+              const li=last.findIndex(t=>t.id===id);
+              if(li>=0) last[li]={...val}; else last.push({...val});
+            }
+          }
+          setArr(arr);
+          setLast(last);
+        }
+      }
+    } else {
+      // Evento su un figlio specifico: path = "/idX" (o "/idX/campo", raro)
+      const id=pathParts[0];
+      if(pathParts.length===1){
+        if(evt.type==='put'){
+          let arr=getArr().slice();
+          let last=getLast().slice();
+          if(data===null){
+            if(!pending.has(id)) arr=arr.filter(t=>t.id!==id);
+            last=last.filter(t=>t.id!==id);
+          } else {
+            if(!pending.has(id)){
+              const i=arr.findIndex(t=>t.id===id);
+              if(i>=0) arr[i]=data; else arr.push(data);
+            }
+            const li=last.findIndex(t=>t.id===id);
+            if(li>=0) last[li]={...data}; else last.push({...data});
+          }
+          setArr(arr);
+          setLast(last);
+        } else if(evt.type==='patch'&&data&&typeof data==='object'){
+          // Patch parziale di un singolo task
+          if(!pending.has(id)){
+            const arr=getArr();
+            const i=arr.findIndex(t=>t.id===id);
+            if(i>=0) arr[i]={...arr[i],...data};
+          }
+          const last=getLast();
+          const li=last.findIndex(t=>t.id===id);
+          if(li>=0) last[li]={...last[li],...data};
+        }
+      }
+      // Path più profondi (campo singolo) sono ignorati: la nostra app scrive sempre l'intero task.
+    }
+
+    compact();
+    saveLocal();
+    render();
+    setSyncStatus('ok','✓ Sincronizzato · '+nowHHMM());
+
+    // Calcola il diff e notifica con un toast se ci sono modifiche da altri utenti
+    const tDiff=diffCollections(beforeTasks,tasks);
+    const dDiff=diffCollections(beforeDeleted,deletedTasks);
+    notifyRemoteChanges(tDiff,dDiff);
+  }catch(e){
+    console.error('Errore applicazione evento stream',e,evt);
   }
 }
 
@@ -433,6 +825,13 @@ function disconnectFirebase(){
   if(!confirm('Rimuovere la connessione Firebase? I dati rimarranno in locale.')) return;
   localStorage.removeItem('trsp_firebase');
   fbUrl='';
+  stopStreaming();
+  stopPolling();
+  lastSyncedTasks=[];
+  lastSyncedDeleted=[];
+  pendingIdsTasks.clear();
+  pendingIdsDeleted.clear();
+  streamActive=false;
   closeCfg();
   setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');
 }
@@ -444,7 +843,10 @@ function load(){loadFromServer().then(render);}
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
 
 function compact(){
-  tasks.sort((a,b)=>a.pos-b.pos);
+  // Ordinamento deterministico con tiebreaker su createdAt e id:
+  // se due utenti assegnano concorrentemente la stessa posizione a task diversi,
+  // tutti i client convergono allo stesso ordinamento finale.
+  tasks.sort((a,b)=>(a.pos-b.pos)||((a.createdAt||0)-(b.createdAt||0))||(a.id<b.id?-1:1));
   tasks.forEach((t,i)=>t.pos=i+1);
 }
 
@@ -715,24 +1117,58 @@ function updateTypeSel(){
   });
 }
 
-function saveTask(){
+async function saveTask(){
   const addr=document.getElementById('fAddr').value.trim();
   if(!addr){alert('Inserisci destinazione/indirizzo');document.getElementById('fAddr').focus();return;}
   const urgent=document.getElementById('fUrgent').checked;
   const done=document.getElementById('fDone').checked;
   const notes=document.getElementById('fNotes').value.trim();
-  const pos=parseInt(document.getElementById('fPos').value)||tasks.length+1;
+  const posInput=document.getElementById('fPos').value;
+  const userSpecifiedPos=posInput!==''&&posInput!=null;
+  const reqPos=parseInt(posInput)||0;
 
-  if(editId){
-    const t=tasks.find(t=>t.id===editId);
-    const oldPos=t.pos;
-    t.addr=addr;t.type=selTypeVal;t.urgent=urgent;t.done=done;t.notes=notes;
-    if(pos!==oldPos) moveTo(editId,pos); else compact();
-  } else {
-    const t={id:uid(),addr,type:selTypeVal,urgent,done,notes,pos:0,createdAt:Date.now()};
-    insertAt(Math.max(1,Math.min(pos,tasks.length+1)),t);
+  // Disabilita il pulsante per evitare doppi click mentre sincronizziamo
+  const btn=document.querySelector('.btn-save');
+  const btnText=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='🔄 Sincronizzazione…';}
+
+  // STEP 1 — Prima del salvataggio, scarichiamo lo stato reale del server.
+  // Così integriamo eventuali task aggiunti da altri utenti nel frattempo
+  // e non rischiamo di sovrascriverli.
+  const countBefore=tasks.length;
+  const hadRemote=await fetchAndMerge(false);
+  const countAfter=tasks.length;
+
+  try{
+    if(editId){
+      const t=tasks.find(t=>t.id===editId);
+      if(!t){alert('⚠ Il task che stavi modificando è stato eliminato da un altro utente.');return;}
+      const oldPos=t.pos;
+      t.addr=addr;t.type=selTypeVal;t.urgent=urgent;t.done=done;t.notes=notes;
+      const targetPos=userSpecifiedPos?Math.max(1,Math.min(reqPos,tasks.length)):oldPos;
+      if(targetPos!==oldPos) moveTo(editId,targetPos); else compact();
+    } else {
+      const t={id:uid(),addr,type:selTypeVal,urgent,done,notes,pos:0,createdAt:Date.now()};
+      // STEP 2 — Calcolo posizione robusto:
+      // - se l'utente NON ha specificato una posizione → metti in coda
+      // - se l'utente ha specificato una posizione MA nel frattempo sono arrivati task
+      //   da altri utenti → metti comunque in coda e avvisa (evita conflitti di numero)
+      // - altrimenti rispetta la posizione scelta
+      let finalPos;
+      if(!userSpecifiedPos){
+        finalPos=tasks.length+1;
+      } else if(hadRemote&&countAfter!==countBefore){
+        finalPos=tasks.length+1;
+        showToast('Posizione aggiornata automaticamente',`Il task è stato messo in coda (#${finalPos}) perché altri utenti hanno aggiunto nuovi task`,'warn');
+      } else {
+        finalPos=Math.max(1,Math.min(reqPos,tasks.length+1));
+      }
+      insertAt(finalPos,t);
+    }
+    save();render();closeModal();
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent=btnText;}
   }
-  save();render();closeModal();
 }
 
 // ── KEYBOARD ─────────────────────────────────────────
