@@ -68,6 +68,8 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
 .badge-entrambi{background:#ede9fe;color:#6d28d9}
 .badge-urgent{background:var(--red-bg);color:var(--red);border:1px solid var(--red-b)}
 .badge-done{background:var(--green-bg);color:var(--green)}
+.badge-operator{background:#fef3c7;color:#92400e;border:1px solid #fde68a}
+.badge-date{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;font-weight:600}
 
 .task-right{display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0}
 .check-btn{width:28px;height:28px;border-radius:50%;border:2.5px solid var(--gray-b);background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px;transition:all .15s}
@@ -277,6 +279,12 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
     <div class="form-group">
       <label>Destinazione / Indirizzo</label>
       <input type="text" id="fAddr" placeholder="Es. Via Roma 10, Milano" autocomplete="off">
+    </div>
+
+    <div class="form-group">
+      <label>👤 Operatore</label>
+      <input type="text" id="fOperator" placeholder="Nome operatore" autocomplete="off" list="operatorList">
+      <datalist id="operatorList"></datalist>
     </div>
 
     <div class="form-group">
@@ -842,6 +850,41 @@ function load(){loadFromServer().then(render);}
 // ── ID / HELPERS ─────────────────────────────────────
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
 
+// ── OPERATORI (storia in localStorage) ───────────────
+function getOperators(){
+  try{return JSON.parse(localStorage.getItem('trsp_operators')||'[]');}catch(e){return [];}
+}
+function rememberOperator(name){
+  if(!name) return;
+  name=name.trim();
+  if(!name) return;
+  let list=getOperators().filter(o=>o.toLowerCase()!==name.toLowerCase());
+  list.unshift(name);
+  list=list.slice(0,15); // max 15 nomi memorizzati
+  localStorage.setItem('trsp_operators',JSON.stringify(list));
+  localStorage.setItem('trsp_last_operator',name);
+}
+function getLastOperator(){return localStorage.getItem('trsp_last_operator')||'';}
+function refreshOperatorDatalist(){
+  const dl=document.getElementById('operatorList');
+  if(!dl) return;
+  const ops=getOperators();
+  dl.innerHTML=ops.map(o=>`<option value="${esc(o)}">`).join('');
+}
+
+// Formatta una data (timestamp) in formato italiano breve
+function fmtDate(ts){
+  if(!ts) return '';
+  const d=new Date(ts);
+  const today=new Date();
+  const sameDay=d.toDateString()===today.toDateString();
+  if(sameDay){
+    return 'Oggi '+d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
+  }
+  return d.toLocaleDateString('it-IT',{day:'2-digit',month:'2-digit',year:'2-digit'})+' '+
+         d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
+}
+
 function compact(){
   // Ordinamento deterministico con tiebreaker su createdAt e id:
   // se due utenti assegnano concorrentemente la stessa posizione a task diversi,
@@ -936,6 +979,8 @@ function render(){
         entrambi:`<span class="badge badge-entrambi">📦🔄 Entrambi</span>`
       }[t.type]||'';
       const delDate=t.deletedAt?new Date(t.deletedAt).toLocaleDateString('it-IT',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+      const operatorBadge=t.operator?`<span class="badge badge-operator">👤 ${esc(t.operator)}</span>`:'';
+      const dateBadge=t.createdAt?`<span class="badge badge-date">🕒 ${esc(fmtDate(t.createdAt))}</span>`:'';
       const notesHtml=t.notes?`<div class="task-notes" id="notes-${t.id}">${esc(t.notes)}</div>`:'';
       return `
       <div class="task trashed" id="task-${t.id}">
@@ -943,7 +988,7 @@ function render(){
           <div class="pos-badge" style="cursor:default;font-size:18px">🗑️</div>
           <div class="task-main">
             <div class="task-title">${esc(t.addr)}</div>
-            <div class="task-meta">${typeBadge}<span class="badge" style="background:#f3f4f6;color:#6b7280">Cancellato ${delDate}</span></div>
+            <div class="task-meta">${typeBadge}${operatorBadge}${dateBadge}<span class="badge" style="background:#f3f4f6;color:#6b7280">Cancellato ${delDate}</span></div>
           </div>
         </div>
         ${notesHtml}
@@ -964,6 +1009,8 @@ function render(){
     }[t.type]||'';
     const urgentBadge=t.urgent?`<span class="badge badge-urgent">⚡ Urgente</span>`:'';
     const doneBadge=t.done?`<span class="badge badge-done">✅ Fatto</span>`:'';
+    const operatorBadge=t.operator?`<span class="badge badge-operator">👤 ${esc(t.operator)}</span>`:'';
+    const dateBadge=t.createdAt?`<span class="badge badge-date">🕒 ${esc(fmtDate(t.createdAt))}</span>`:'';
     const notesIcon=t.notes?`<button class="ta-btn notes-btn" onclick="toggleNotes('${t.id}')">📝 Note</button>`:'';
     const notesHtml=t.notes?`<div class="task-notes hidden" id="notes-${t.id}">${esc(t.notes)}</div>`:'';
     return `
@@ -972,7 +1019,7 @@ function render(){
         <div class="pos-badge" onclick="openPosPopup('${t.id}')" title="Tocca per cambiare posizione">${t.pos}</div>
         <div class="task-main">
           <div class="task-title">${esc(t.addr)}</div>
-          <div class="task-meta">${typeBadge}${urgentBadge}${doneBadge}</div>
+          <div class="task-meta">${typeBadge}${urgentBadge}${doneBadge}${operatorBadge}${dateBadge}</div>
         </div>
         <div class="task-right">
           <div class="check-btn${t.done?' done':''}" onclick="toggleDone('${t.id}')">${t.done?'✓':''}</div>
@@ -1064,12 +1111,14 @@ function openModal(){
   selTypeVal='consegna';
   document.getElementById('modalTitle').textContent='➕ Nuovo Task';
   document.getElementById('fAddr').value='';
+  document.getElementById('fOperator').value=getLastOperator();
   document.getElementById('fUrgent').checked=false;
   document.getElementById('fDone').checked=false;
   document.getElementById('fNotes').value='';
   const pos=tasks.length+1;
   document.getElementById('fPos').value=pos;
   document.getElementById('posHint').textContent='di '+(tasks.length)+' task — lascia '+(pos)+' per aggiungere in fondo';
+  refreshOperatorDatalist();
   updateTypeSel();
   document.getElementById('modalBtns').innerHTML=
     `<button class="btn btn-cancel" onclick="closeModal()">Annulla</button>
@@ -1085,11 +1134,13 @@ function openEdit(id){
   selTypeVal=t.type;
   document.getElementById('modalTitle').textContent='✏️ Modifica Task';
   document.getElementById('fAddr').value=t.addr;
+  document.getElementById('fOperator').value=t.operator||'';
   document.getElementById('fUrgent').checked=t.urgent;
   document.getElementById('fDone').checked=t.done;
   document.getElementById('fNotes').value=t.notes||'';
   document.getElementById('fPos').value=t.pos;
   document.getElementById('posHint').textContent='di '+tasks.length+' task';
+  refreshOperatorDatalist();
   updateTypeSel();
   document.getElementById('modalBtns').innerHTML=
     `<button class="btn btn-delete" onclick="deleteTask('${id}');closeModal()">🗑️ Elimina</button>
@@ -1120,6 +1171,7 @@ function updateTypeSel(){
 async function saveTask(){
   const addr=document.getElementById('fAddr').value.trim();
   if(!addr){alert('Inserisci destinazione/indirizzo');document.getElementById('fAddr').focus();return;}
+  const operator=document.getElementById('fOperator').value.trim();
   const urgent=document.getElementById('fUrgent').checked;
   const done=document.getElementById('fDone').checked;
   const notes=document.getElementById('fNotes').value.trim();
@@ -1144,11 +1196,13 @@ async function saveTask(){
       const t=tasks.find(t=>t.id===editId);
       if(!t){alert('⚠ Il task che stavi modificando è stato eliminato da un altro utente.');return;}
       const oldPos=t.pos;
-      t.addr=addr;t.type=selTypeVal;t.urgent=urgent;t.done=done;t.notes=notes;
+      t.addr=addr;t.type=selTypeVal;t.urgent=urgent;t.done=done;t.notes=notes;t.operator=operator;
+      // Se non era già impostata, registra la data di creazione (compat. con task vecchi)
+      if(!t.createdAt) t.createdAt=Date.now();
       const targetPos=userSpecifiedPos?Math.max(1,Math.min(reqPos,tasks.length)):oldPos;
       if(targetPos!==oldPos) moveTo(editId,targetPos); else compact();
     } else {
-      const t={id:uid(),addr,type:selTypeVal,urgent,done,notes,pos:0,createdAt:Date.now()};
+      const t={id:uid(),addr,operator,type:selTypeVal,urgent,done,notes,pos:0,createdAt:Date.now()};
       // STEP 2 — Calcolo posizione robusto:
       // - se l'utente NON ha specificato una posizione → metti in coda
       // - se l'utente ha specificato una posizione MA nel frattempo sono arrivati task
@@ -1165,6 +1219,7 @@ async function saveTask(){
       }
       insertAt(finalPos,t);
     }
+    if(operator) rememberOperator(operator);
     save();render();closeModal();
   }finally{
     if(btn){btn.disabled=false;btn.textContent=btnText;}
