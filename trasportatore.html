@@ -227,6 +227,15 @@ html,body{height:100%;background:#f1f5f9;font-family:-apple-system,BlinkMacSyste
       <button class="btn btn-cancel" onclick="closeCfg()">Chiudi</button>
       <button class="btn btn-save" onclick="saveAndConnect()">🔗 Connetti</button>
     </div>
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid #f1f5f9">
+      <h3 style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:6px">🚨 Strumenti di emergenza</h3>
+      <p style="font-size:11.5px;color:var(--gray);margin-bottom:10px;line-height:1.4">Usa questi strumenti se ci sono task che non si riescono a cancellare normalmente, oppure se il cestino non si svuota.</p>
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <button class="btn" style="background:#fffbeb;color:#92400e;font-size:12.5px;padding:9px;border:1px solid #fde68a;text-align:left" onclick="diagnosticAndRepair()">🔍 Diagnostica e ripara — trova entry corrotte</button>
+        <button class="btn" style="background:#fef2f2;color:var(--red);font-size:12.5px;padding:9px;border:1px solid var(--red-b);text-align:left" onclick="forceClearServerTrash()">🗑️ Svuota cestino server (forza)</button>
+        <button class="btn" style="background:#fef2f2;color:var(--red);font-size:12.5px;padding:9px;border:1px solid var(--red-b);text-align:left" onclick="forceUploadLocal()">💪 Sovrascrivi server con dati locali</button>
+      </div>
+    </div>
     <div style="margin-top:14px;padding-top:14px;border-top:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center">
       <span style="font-size:12px;color:var(--gray)">Rimuovi connessione e usa solo locale</span>
       <button class="btn" style="background:#fef2f2;color:var(--red);font-size:12px;padding:8px 14px;flex:none" onclick="disconnectFirebase()">🗑️ Disconnetti</button>
@@ -426,11 +435,25 @@ function notifyRemoteChanges(tasksDiff,delDiff){
   showToast('Modifiche da un altro utente: '+parts.join(', '),detail);
 }
 
+// Sanitizza una collezione: scarta item senza id valido, deduplica per id
+function sanitizeCollection(arr){
+  const seen=new Set();
+  return (arr||[]).filter(t=>{
+    if(!t||typeof t!=='object') return false;
+    if(!t.id||typeof t.id!=='string') return false;
+    if(seen.has(t.id)) return false;
+    seen.add(t.id);
+    return true;
+  });
+}
+
 // Converte la risposta di Firebase (array o oggetto o null) in array pulito
 function parseCollection(data){
   if(!data||typeof data!=='object') return [];
-  if(Array.isArray(data)) return data.filter(Boolean);
-  return Object.values(data).filter(Boolean);
+  let arr;
+  if(Array.isArray(data)) arr=data.filter(Boolean);
+  else arr=Object.values(data).filter(Boolean);
+  return sanitizeCollection(arr);
 }
 
 // Confronto strutturale tra due task (ignora l'ordine delle chiavi)
@@ -842,6 +865,128 @@ function disconnectFirebase(){
   streamActive=false;
   closeCfg();
   setSyncStatus('local','Solo locale — tocca ⚙️ per abilitare sync');
+}
+
+// ── STRUMENTI DI EMERGENZA ──────────────────────────
+// 1) Diagnostica: trova entry orfane (key Firebase ≠ id task), senza id, o duplicate, e le rimuove.
+async function diagnosticAndRepair(){
+  if(!fbUrl){alert('⚠ Non sei connesso a Firebase. Connettiti prima.');return;}
+  if(!confirm('🔍 DIAGNOSTICA E RIPARA\n\nScansiona Firebase e rimuove le entry "orfane":\n• item dove la chiave Firebase non corrisponde al campo id del task\n• item senza id valido\n• item duplicati (stesso id)\n\nI task validi NON saranno toccati.\n\nContinuare?')) return;
+
+  setSyncStatus('syncing','Diagnostica in corso…');
+  const summary={tasksOrphan:0,tasksDup:0,delOrphan:0,delDup:0,totalScanned:0};
+
+  try{
+    for(const which of ['tasks','deletedTasks']){
+      const r=await fetch(fbUrl+'/'+which+'.json',{cache:'no-store'});
+      if(!r.ok) continue;
+      const data=await r.json();
+      if(!data||typeof data!=='object') continue;
+
+      const seen=new Set();
+      const toDelete={};
+      const entries=Array.isArray(data)?data.map((v,i)=>[String(i),v]):Object.entries(data);
+
+      for(const [key,val] of entries){
+        summary.totalScanned++;
+        if(!val||typeof val!=='object'){toDelete[key]=null;continue;}
+        if(!val.id||typeof val.id!=='string'){
+          toDelete[key]=null;
+          if(which==='tasks') summary.tasksOrphan++; else summary.delOrphan++;
+          continue;
+        }
+        if(val.id!==key){
+          // chiave Firebase non coincide con l'id del task → rimuovi questa entry orfana
+          toDelete[key]=null;
+          if(which==='tasks') summary.tasksOrphan++; else summary.delOrphan++;
+          continue;
+        }
+        if(seen.has(val.id)){
+          toDelete[key]=null;
+          if(which==='tasks') summary.tasksDup++; else summary.delDup++;
+          continue;
+        }
+        seen.add(val.id);
+      }
+
+      if(Object.keys(toDelete).length){
+        const r2=await fetch(fbUrl+'/'+which+'.json',{
+          method:'PATCH',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(toDelete)
+        });
+        if(!r2.ok) throw new Error(which+': HTTP '+r2.status);
+      }
+    }
+
+    const total=summary.tasksOrphan+summary.tasksDup+summary.delOrphan+summary.delDup;
+    if(total===0){
+      alert('✅ Nessun problema rilevato.\n\nScansionate '+summary.totalScanned+' entry. I dati su Firebase sono già puliti.');
+      setSyncStatus('ok','✓ Diagnostica OK');
+    } else {
+      alert('🛠️ Pulizia completata!\n\nTask orfani rimossi: '+summary.tasksOrphan+
+            '\nTask duplicati rimossi: '+summary.tasksDup+
+            '\nCestino orfani rimossi: '+summary.delOrphan+
+            '\nCestino duplicati rimossi: '+summary.delDup+
+            '\n\nTotale: '+total+' entry corrette su '+summary.totalScanned+' scansionate.\n\nRicarico i dati…');
+      closeCfg();
+      await loadFromServer();
+      render();
+    }
+  }catch(e){
+    setSyncStatus('err','Errore diagnostica');
+    alert('❌ Errore durante la diagnostica:\n'+e.message);
+  }
+}
+
+// 2) Svuota cestino su server (DELETE diretto, ignora la sync logic)
+async function forceClearServerTrash(){
+  if(!fbUrl){alert('⚠ Non sei connesso a Firebase. Connettiti prima.');return;}
+  if(!confirm('🚨 SVUOTA CESTINO SU SERVER\n\nQuesta operazione cancellerà DEFINITIVAMENTE tutti i task del cestino su Firebase, ignorando la normale sincronizzazione.\n\nUtile quando ci sono task fantasma nel cestino che non si riescono ad eliminare nel modo classico.\n\nContinuare?')) return;
+  setSyncStatus('syncing','Pulizia cestino server…');
+  try{
+    const r=await fetch(fbUrl+'/deletedTasks.json',{method:'DELETE'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    deletedTasks=[];
+    lastSyncedDeleted=[];
+    saveLocal();
+    render();
+    setSyncStatus('ok','✓ Cestino server svuotato');
+    showToast('Cestino server svuotato','La pulizia è sincronizzata su tutti i dispositivi');
+    closeCfg();
+  }catch(e){
+    setSyncStatus('err','Errore: '+e.message);
+    alert('❌ Errore: '+e.message);
+  }
+}
+
+// 3) Sovrascrive server con dati locali (PUT che rimpiazza tutto)
+async function forceUploadLocal(){
+  if(!fbUrl){alert('⚠ Non sei connesso a Firebase. Connettiti prima.');return;}
+  if(!confirm('🚨 SOVRASCRIVI SERVER CON DATI LOCALI\n\nQuesta operazione cancella TUTTI i dati su Firebase (sia tasks che cestino) e li sostituisce con quelli che vedi adesso sul tuo schermo.\n\n⚠️ Eventuali modifiche fatte da altri utenti che non hai ancora visto andranno PERSE.\n\nContinuare?')) return;
+  setSyncStatus('syncing','Sovrascrittura server in corso…');
+  try{
+    const tasksObj={}; tasks.forEach(t=>{if(t&&t.id) tasksObj[t.id]=t;});
+    const delObj={};   deletedTasks.forEach(t=>{if(t&&t.id) delObj[t.id]=t;});
+
+    const tasksBody=Object.keys(tasksObj).length?JSON.stringify(tasksObj):'null';
+    const delBody=Object.keys(delObj).length?JSON.stringify(delObj):'null';
+
+    const [r1,r2]=await Promise.all([
+      fetch(fbUrl+'/tasks.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:tasksBody}),
+      fetch(fbUrl+'/deletedTasks.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:delBody})
+    ]);
+    if(!r1.ok) throw new Error('Tasks: HTTP '+r1.status);
+    if(!r2.ok) throw new Error('Cestino: HTTP '+r2.status);
+
+    lastSyncedTasks=tasks.map(t=>({...t}));
+    lastSyncedDeleted=deletedTasks.map(t=>({...t}));
+    setSyncStatus('ok','✓ Server sovrascritto');
+    showToast('Server sovrascritto','Tutti i dispositivi vedranno questa versione dopo il prossimo refresh');
+    closeCfg();
+  }catch(e){
+    setSyncStatus('err','Errore: '+e.message);
+    alert('❌ Errore: '+e.message);
+  }
 }
 
 // ── INIT LOAD ─────────────────────────────────────────
